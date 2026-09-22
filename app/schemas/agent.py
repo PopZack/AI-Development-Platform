@@ -27,6 +27,24 @@ class ArtifactRead(ReadModel):
     created_at: UtcDateTime
     updated_at: UtcDateTime
 
+    @classmethod
+    def from_entity(cls, artifact) -> ArtifactRead:
+        """显式构造而不是 ``model_validate``：``content_json`` 要改名成对外的 ``content``。
+
+        这层名字映射是故意的 —— 库里叫 ``content_json``（SQLite 的 JSON 列习惯带后缀），
+        对外叫 ``content``（调用方不关心存储细节）。
+        """
+        return cls(
+            id=artifact.id,
+            requirement_id=artifact.requirement_id,
+            agent_run_id=artifact.agent_run_id,
+            type=ArtifactType(artifact.type),
+            version=artifact.version,
+            content=artifact.content_json,
+            created_at=artifact.created_at,
+            updated_at=artifact.updated_at,
+        )
+
 
 class AgentArtifactList(ReadModel):
     items: list[ArtifactRead]

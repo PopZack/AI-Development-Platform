@@ -170,9 +170,7 @@ Authorization: Bearer <access_token>
 并把已存在的那条读回来按重放返回（而不是把 500 抛给客户端）。
 
 **只创建、不执行**：新建的运行停在 `status=CREATED`、`current_step=PENDING`，
-`started_at` 为 `null`。文档 §7.4 里的 `start` / `pause` / `resume` / `cancel` 与
-`artifacts` **刻意没有实现** —— 它们要驱动状态机、跑 Agent、产生交付物，分别属于
-Stage 4 和 Stage 3。现在加上只会是一组点了没反应的接口，比不提供更糟：调用方会以为功能可用。
+`started_at` 为 `null`。执行用 `/runs/{id}/start`（见下节）。
 
 > 文档 §6.3 给 `workflow_runs` 定义了 `status` 和 `current_step` 两个 NOT NULL 字段，
 > 但**没说它们的区别**。本项目的划分：`status` 是 §3.3 那台状态机（对外可见的阶段），
@@ -463,6 +461,52 @@ app/infrastructure/tools/
 对应地 `tool_calls.status` 里 `APPROVAL_REQUIRED` 与 `DENIED` 是两个独立取值，
 审批流程要能从审计里筛出来，靠的就是这一条。
 
+### 工作流执行编排（Stage 4）
+
+五个 Agent 被 `WorkflowOrchestrator` 串成完整闭环。幂等创建（上一节）之后：
+
+| Method | Path | 权限 | 说明 |
+|---|---|---|---|
+| POST | `/runs/{id}/start` | OWNER / DEVELOPER | 启动执行，跑到第一个停点（**慢**，会真实调模型） |
+| POST | `/runs/{id}/resume` | OWNER / DEVELOPER | 从停点恢复 |
+| POST | `/runs/{id}/approve` | **仅 OWNER** | 最终人工批准 → `COMPLETED` |
+| POST | `/runs/{id}/reject` | **仅 OWNER** | 最终驳回（可 resume 返工） |
+| POST | `/runs/{id}/cancel` | OWNER / DEVELOPER | 取消（非终态且未 `APPROVED`） |
+| GET | `/runs/{id}/artifacts` | 项目成员 | 这条工作流产出的交付物 |
+
+生命周期与两个停点：
+
+```
+CREATED --start--> RUNNING --> ANALYZING --> PLANNING --> IMPLEMENTING
+                                                                │
+                     ┌── (IMPLEMENTING, TOOL_GATEWAY) ◄─────────┘   停点①：补丁审批
+                     │   OWNER 批准后 resume(approval_id)
+                     ▼
+                  TESTING --> REVIEWING ──needs_revision──► REVISION_REQUIRED
+                     passed                （resume 回到实现，旧 PATCH 保留出 v2）
+                     │
+                     ▼
+            (WAITING_APPROVAL, APPROVAL)                            停点②：最终审批
+              approve → APPROVED → COMPLETED
+              reject  → REJECTED ──resume──► 返工
+```
+
+**两个停点都用「合法状态 + 特定 current_step」表达，没有新增状态。**
+§3.3 的迁移表只允许 `REVIEWING → WAITING_APPROVAL`，所以补丁审批暂停不借用这个状态
+—— 用 `current_step` 表达「阶段内卡在哪」本来就是它存在的意义（见上一节的划分）。
+响应里 `paused=true` + `pause_reason`（`tool_approval` / `final_approval`）直接告诉调用方在等什么。
+
+其他要点：
+
+- **REJECTED / REVISION_REQUIRED 的返工在 resume 的同一请求内闭环**：
+  回到实现 → 出新补丁 → 又停在新审批上。旧 PATCH 交付物按版本保留。
+- **Agent 失败 → 工作流 `FAILED`**，`error_code` / `error_message` 落在 run 上；
+  `agent_runs` 里有每次尝试的细节。
+- **Developer 不能做最终批准**（`approve` / `reject` 仅 OWNER）——
+  可以启动工作流但不能拍板，与工具审批的职责分离一致。
+- 主循环有步数护栏（12 步）：状态机最长合法路径约 8 步，超限说明推进逻辑有 bug，
+  快速失败而不是原地打转。
+
 ### 补丁工具与审批闭环（L2 / L4）
 
 ```
@@ -579,8 +623,8 @@ APPROVAL_REQUIRED，含入参、结果摘要、错误码、耗时。
 |---|---|---|
 | Stage 1 | 基础 API + 用户/项目/需求 CRUD + 统一错误 + pytest | ✅ 已完成 |
 | Stage 2 | JWT 认证、密码哈希接入、Owner/Developer 角色、资源级权限、幂等键 | ✅ 已完成 |
-| Stage 3 | LLM Provider 抽象、Product / Architect Agent、结构化输出校验、Agent Run 记录 | 🔄 进行中（Provider 抽象 + Agent Runtime + agent_runs/artifacts 已完成；Product/Architect Agent 与接口待做） |
-| Stage 4 | 工作流状态机、Developer / Tester / Reviewer、Tool Gateway、审批、交付物汇总 | 待开始 |
+| Stage 3 | LLM Provider 抽象、Product / Architect Agent、结构化输出校验、Agent Run 记录 | ✅ 已完成 |
+| Stage 4 | 工作流状态机、Developer / Tester / Reviewer、Tool Gateway、审批、交付物汇总 | 🔄 进行中（Tool Gateway + 补丁闭环 + 审批 + 工作流编排已完成；交付物汇总与收尾待做） |
 | Stage 5 | Redis 限流、SSE、真实测试执行、Alembic、MySQL 兼容、简易 Web UI（可选增强） | 不阻塞交付 |
 
 ---

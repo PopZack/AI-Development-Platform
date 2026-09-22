@@ -24,7 +24,16 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-__all__ = ["ArchitectureComponent", "ArchitectureDesign", "Prd"]
+__all__ = [
+    "ArchitectureComponent",
+    "ArchitectureDesign",
+    "DeveloperPatch",
+    "FileChange",
+    "Prd",
+    "ReviewFindings",
+    "TestCaseResult",
+    "TestReport",
+]
 
 
 class Prd(BaseModel):
@@ -82,4 +91,70 @@ class ArchitectureDesign(BaseModel):
     risks: list[str] = Field(default_factory=list, description="风险与不确定点，以及打算怎么应对")
     test_strategy: list[str] = Field(
         min_length=1, description="测试策略：需要覆盖哪些场景，哪些用单测、哪些用集成测试"
+    )
+
+
+class FileChange(BaseModel):
+    """一个文件的目标内容。
+
+    用「最终长什么样」而不是 diff：Agent 生成目标状态比生成变更过程更不容易出错，
+    应用时也不用解析 diff 格式（解析 diff 的边界情况多得离谱）。
+    """
+
+    path: str = Field(min_length=1, description="相对工作区根的文件路径，不要以 / 开头")
+    new_content: str = Field(description="这个文件的完整目标内容（不是增量 diff）")
+    reason: str = Field(min_length=1, description="为什么改这个文件，一句话")
+
+
+class DeveloperPatch(BaseModel):
+    """Developer Agent 的产出（文档 §3.2 流程 B 第三步）。"""
+
+    summary: str = Field(min_length=1, description="这次变更做了什么，一段话")
+    changes: list[FileChange] = Field(
+        min_length=1,
+        max_length=20,
+        description="文件变更清单。每个文件一条；新增文件也要给出完整内容",
+    )
+    follows_architecture: bool = Field(description="变更是否严格遵循架构设计的模块划分")
+    notes: list[str] = Field(default_factory=list, description="需要评审者特别注意的点")
+
+
+class TestCaseResult(BaseModel):
+    """一条测试用例的执行/推演结论。"""
+
+    name: str = Field(min_length=1, description="用例名，例如「重复标题返回 409」")
+    expectation: str = Field(min_length=1, description="期望行为（来自验收标准）")
+    passed: bool = Field(description="该用例是否通过")
+    detail: str = Field(default="", description="失败时的具体观察；通过时可留空")
+
+
+class TestReport(BaseModel):
+    """Tester Agent 的产出（文档 §12.6）。"""
+
+    verdict: str = Field(pattern="^(pass|fail)$", description="总体结论：pass 或 fail")
+    summary: str = Field(min_length=1, description="一段话总结测试结论")
+    cases: list[TestCaseResult] = Field(
+        min_length=1, description="逐条验收标准对应的用例结果，必须覆盖全部验收标准"
+    )
+    risks: list[str] = Field(default_factory=list, description="未覆盖/无法验证的点")
+
+
+class ReviewFinding(BaseModel):
+    """Reviewer 发现的一个问题（或一条肯定）。"""
+
+    severity: str = Field(pattern="^(blocker|major|minor|praise)$", description="问题严重级别")
+    file: str = Field(default="", description="相关文件；不针对具体文件可留空")
+    comment: str = Field(min_length=1, description="问题描述 / 肯定理由，写清依据")
+
+
+class ReviewFindings(BaseModel):
+    """Reviewer Agent 的产出（文档 §12.7）。"""
+
+    verdict: str = Field(
+        pattern="^(approved|needs_revision)$",
+        description="approved=可以进入人工审批；needs_revision=必须回到实现阶段修改",
+    )
+    summary: str = Field(min_length=1, description="一段话总结审查结论")
+    findings: list[ReviewFinding] = Field(
+        min_length=1, description="逐条审查意见；全都没问题也至少给一条 praise"
     )

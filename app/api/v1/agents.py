@@ -30,21 +30,7 @@ router = APIRouter(tags=["agents"])
 
 
 def _to_read(artifact) -> ArtifactRead:
-    """显式构造而不是 ``model_validate``：``content_json`` 要改名成对外的 ``content``。
-
-    这层名字映射是故意的 —— 库里叫 ``content_json``（因为 SQLite 的 JSON 列习惯带后缀），
-    对外叫 ``content``（调用方不关心存储细节）。
-    """
-    return ArtifactRead(
-        id=artifact.id,
-        requirement_id=artifact.requirement_id,
-        agent_run_id=artifact.agent_run_id,
-        type=ArtifactType(artifact.type),
-        version=artifact.version,
-        content=artifact.content_json,
-        created_at=artifact.created_at,
-        updated_at=artifact.updated_at,
-    )
+    return ArtifactRead.from_entity(artifact)
 
 
 @router.post(

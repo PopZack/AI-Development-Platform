@@ -9,6 +9,7 @@ Layer: Common（DI 装配）—— 只负责把 Session / Settings 包成 Servic
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, Query, Request
@@ -21,6 +22,7 @@ from app.application.auth_service import AuthService
 from app.application.project_service import ProjectService
 from app.application.requirement_service import RequirementService
 from app.application.user_service import UserService
+from app.application.workflow_orchestrator import WorkflowOrchestrator
 from app.application.workflow_service import WorkflowService
 from app.common.exceptions import AuthenticationError
 from app.config.settings import Settings
@@ -39,6 +41,7 @@ __all__ = [
     "AgentServiceDep",
     "ApprovalServiceDep",
     "WorkflowServiceDep",
+    "WorkflowOrchestratorDep",
     "CurrentUserDep",
     "LimitQuery",
     "OffsetQuery",
@@ -102,6 +105,13 @@ def get_approval_service(session: SessionDep) -> ApprovalService:
     return ApprovalService(session)
 
 
+def get_workflow_orchestrator(
+    session: SessionDep, provider: LLMProviderDep, settings: SettingsDep
+) -> WorkflowOrchestrator:
+    # 工作区按需求分目录：req-<requirement_id>，互不串文件
+    return WorkflowOrchestrator(session, provider, workspace_root=Path(settings.workspace_root))
+
+
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
 UserServiceDep = Annotated[UserService, Depends(get_user_service)]
 ProjectServiceDep = Annotated[ProjectService, Depends(get_project_service)]
@@ -109,6 +119,7 @@ RequirementServiceDep = Annotated[RequirementService, Depends(get_requirement_se
 AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
 ApprovalServiceDep = Annotated[ApprovalService, Depends(get_approval_service)]
 WorkflowServiceDep = Annotated[WorkflowService, Depends(get_workflow_service)]
+WorkflowOrchestratorDep = Annotated[WorkflowOrchestrator, Depends(get_workflow_orchestrator)]
 
 # auto_error=False 是刻意的：HTTPBearer 默认的失败行为是抛 403 且响应体不符合
 # 我们的统一错误结构。关掉它，由我们自己抛 AuthenticationError（401 + 统一错误体）。

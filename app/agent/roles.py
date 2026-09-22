@@ -28,11 +28,22 @@ import json
 
 from pydantic import BaseModel
 
-from app.agent.outputs import ArchitectureDesign, Prd
+from app.agent.outputs import ArchitectureDesign, DeveloperPatch, Prd, ReviewFindings, TestReport
 from app.agent.runtime import AgentSpec
 from app.domain.enums import AgentRole
 
-__all__ = ["ARCHITECT_SPEC", "PRODUCT_SPEC", "build_architecture_user_prompt", "build_prd_user_prompt"]
+__all__ = [
+    "ARCHITECT_SPEC",
+    "DEVELOPER_SPEC",
+    "PRODUCT_SPEC",
+    "REVIEWER_SPEC",
+    "TESTER_SPEC",
+    "build_architecture_user_prompt",
+    "build_developer_user_prompt",
+    "build_prd_user_prompt",
+    "build_reviewer_user_prompt",
+    "build_tester_user_prompt",
+]
 
 # 输出体量较大（实测 PRD 约 3400 completion tokens），给足上限
 _MAX_OUTPUT_TOKENS = 4096
@@ -134,5 +145,126 @@ def build_architecture_user_prompt(*, prd: dict, title: str) -> str:
             json.dumps(prd, ensure_ascii=False, indent=2),
             "",
             "请据此产出技术设计。",
+        ]
+    )
+
+
+DEVELOPER_SPEC = AgentSpec(
+    role=AgentRole.DEVELOPER,
+    system_prompt=(
+        "你是资深后端工程师，负责按照架构设计写出具体的代码变更。\n\n"
+        "写作要求：\n"
+        "- changes 里的 new_content 必须是**文件的完整目标内容**，不是 diff、不是片段。\n"
+        "- path 相对工作区根，不要以 / 开头；新增文件与修改文件都这样给。\n"
+        "- 严格遵循架构设计的模块划分与数据模型，不要引入架构里没有的依赖。\n"
+        "- 验收标准里的每一条都必须能被这次变更覆盖；覆盖不了的写进 notes。\n"
+        "- 代码要完整可运行，不要写「此处省略」。注释与内容用简体中文。\n\n"
+        f"{_COMMON_RULES}\n\n"
+        f"JSON Schema：\n{_json_contract(DeveloperPatch)}"
+    ),
+    output_model=DeveloperPatch,
+    temperature=0.2,
+    max_tokens=_MAX_OUTPUT_TOKENS,
+)
+
+TESTER_SPEC = AgentSpec(
+    role=AgentRole.TESTER,
+    system_prompt=(
+        "你是测试工程师，负责对照验收标准逐条核对本次变更是否达标。\n\n"
+        "核对要求：\n"
+        "- cases 必须覆盖 PRD 的**全部**验收标准，一条不落。\n"
+        "- passed 只有在你基于变更内容能明确判定时才为 true；判定不了就给 false\n"
+        "  并把原因写进 detail —— 宁可误报失败让人复核，也不放过缺陷。\n"
+        "- verdict=fail 当且仅当存在 passed=false 的用例。\n"
+        "- risks 里写清哪些点是无法通过静态核对验证的（例如需要真实运行才能确认的）。\n\n"
+        f"{_COMMON_RULES}\n\n"
+        f"JSON Schema：\n{_json_contract(TestReport)}"
+    ),
+    output_model=TestReport,
+    temperature=0.2,
+    max_tokens=_MAX_OUTPUT_TOKENS,
+)
+
+REVIEWER_SPEC = AgentSpec(
+    role=AgentRole.REVIEWER,
+    system_prompt=(
+        "你是资深代码审查者，负责在进入人工审批前把最后一道关。\n\n"
+        "审查要求：\n"
+        "- verdict=needs_revision 当且仅当存在 blocker 或 major 级别的 finding；\n"
+        "  minor 问题不阻塞，但要写出来。\n"
+        "- blocker 定义：会导致验收标准不达标 / 明显破坏架构分层 / 安全隐患。\n"
+        "- 每条 finding 都要写依据（对照架构设计或验收标准的哪一条），不许只说「不好」。\n"
+        "- 变更里做得好的地方也要给 praise —— 只挑毛病的审查会让实现者回避沟通。\n\n"
+        f"{_COMMON_RULES}\n\n"
+        f"JSON Schema：\n{_json_contract(ReviewFindings)}"
+    ),
+    output_model=ReviewFindings,
+    temperature=0.2,
+    max_tokens=_MAX_OUTPUT_TOKENS,
+)
+
+
+def build_developer_user_prompt(*, prd: dict, architecture: dict, workspace_files: list[str]) -> str:
+    """Developer 的输入：PRD + 架构 + 工作区现状。
+
+    工作区文件清单由 Tool Gateway 的 ``list_files`` 产出后传进来 ——
+    Agent 自己不发工具调用，编排器负责把上下文喂到它面前。
+    """
+    files = "\n".join(f"- {f}" for f in workspace_files) or "（工作区目前为空）"
+    return "\n".join(
+        [
+            "已确认的 PRD（JSON）：",
+            json.dumps(prd, ensure_ascii=False, indent=2),
+            "",
+            "已确认的架构设计（JSON）：",
+            json.dumps(architecture, ensure_ascii=False, indent=2),
+            "",
+            "工作区现有文件：",
+            files,
+            "",
+            "请产出本次代码变更。",
+        ]
+    )
+
+
+def build_tester_user_prompt(*, prd: dict, architecture: dict, written_files: list[str]) -> str:
+    written = "\n".join(f"- {f}" for f in written_files) or "（无）"
+    return "\n".join(
+        [
+            "已确认的 PRD（JSON）：",
+            json.dumps(prd, ensure_ascii=False, indent=2),
+            "",
+            "架构设计（JSON）：",
+            json.dumps(architecture, ensure_ascii=False, indent=2),
+            "",
+            "本次实际写入工作区的文件：",
+            written,
+            "",
+            "请逐条核对验收标准并给出测试报告。",
+        ]
+    )
+
+
+def build_reviewer_user_prompt(
+    *, prd: dict, architecture: dict, patch_summary: str, diff: str, test_report: dict
+) -> str:
+    return "\n".join(
+        [
+            "已确认的 PRD（JSON）：",
+            json.dumps(prd, ensure_ascii=False, indent=2),
+            "",
+            "架构设计（JSON）：",
+            json.dumps(architecture, ensure_ascii=False, indent=2),
+            "",
+            "本次变更概述：",
+            patch_summary,
+            "",
+            "变更 diff（unified diff）：",
+            diff or "（无 diff）",
+            "",
+            "测试报告（JSON）：",
+            json.dumps(test_report, ensure_ascii=False, indent=2),
+            "",
+            "请给出审查结论。",
         ]
     )

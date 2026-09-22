@@ -51,6 +51,8 @@ def test_settings(tmp_path: Path) -> Settings:
         llm_provider="ark",
         llm_api_key="test-key",
         llm_model="test-model",
+        # 工作区也要关进 tmp：不设的话 ./workspace 会写进仓库目录
+        workspace_root=str(tmp_path / "workspace"),
     )
 
 
