@@ -139,8 +139,44 @@ app/
 | GET | `/users/{id}` | 登录 | 同上 |
 | PATCH | `/users/{id}` | **仅本人** | 只能改 `display_name`；账号状态不属于自助修改范围 |
 
-不再有 `POST /users` —— 注册统一走 `/auth/register`。
-注册统一走 `/auth/register` —— 同一个业务动作保留两条入口，两边的校验规则迟早会走偏。
+不再有 `POST /users` —— 注册统一走 `/auth/register`。同一个业务动作保留两条入口，
+两边的校验规则迟早会走偏（比如一边统一小写邮箱、另一边忘了）。
+
+### 工作流（Stage 2，仅创建与查询）
+
+| Method | Path | 要求 | 说明 |
+|---|---|---|---|
+| POST | `/requirements/{id}/runs` | **OWNER / DEVELOPER** | 创建工作流，必须带 `Idempotency-Key` 头 |
+| GET | `/runs/{run_id}` | 该需求所属项目的成员 | 查询运行状态 |
+
+```http
+POST /api/v1/requirements/{requirement_id}/runs
+Idempotency-Key: requirement-001-v1
+Authorization: Bearer <access_token>
+```
+
+响应约定：
+
+| 情况 | 状态码 | 说明 |
+|---|---|---|
+| 新建成功 | `201` | 返回这条工作流 |
+| 同一个键重放 | `200` | 响应头带 `Idempotent-Replay: true`，返回**当初那条**（不是新记录） |
+| 同一个键用在另一份需求 | `409` | `IDEMPOTENCY_KEY_CONFLICT` —— 这是客户端 bug，不是重试 |
+| 没带 `Idempotency-Key` | `422` | 不带就不给建，否则「双击启动」会安静地产生两条 |
+
+**为什么幂等键是必须的而不是可选的**：创建工作流是「要么跑一次、要么重试」的操作。
+如果只靠应用层「先查再插」，并发下两个请求会同时读到「不存在」然后同时插入 ——
+真正兜底的是 `idempotency_key` 上的 UNIQUE 约束，Service 会捕获 `IntegrityError`
+并把已存在的那条读回来按重放返回（而不是把 500 抛给客户端）。
+
+**只创建、不执行**：新建的运行停在 `status=CREATED`、`current_step=PENDING`，
+`started_at` 为 `null`。文档 §7.4 里的 `start` / `pause` / `resume` / `cancel` 与
+`artifacts` **刻意没有实现** —— 它们要驱动状态机、跑 Agent、产生交付物，分别属于
+Stage 4 和 Stage 3。现在加上只会是一组点了没反应的接口，比不提供更糟：调用方会以为功能可用。
+
+> 文档 §6.3 给 `workflow_runs` 定义了 `status` 和 `current_step` 两个 NOT NULL 字段，
+> 但**没说它们的区别**。本项目的划分：`status` 是 §3.3 那台状态机（对外可见的阶段），
+> `current_step` 是该阶段内部正在等哪个环节（排障粒度，取值见 `WorkflowStep`）。
 
 ### 权限模型
 
@@ -212,9 +248,9 @@ Authorization: Bearer <access_token>
 
 ## 数据库
 
-首期核心表（已建）：`users`、`projects`、`project_members`、`requirements`
+首期核心表（已建）：`users`、`projects`、`project_members`、`requirements`、`workflow_runs`
 
-按实现进度再增加：`workflow_runs`、`agent_runs`、`artifacts`、`approvals`（Stage 3/4），
+按实现进度再增加：`agent_runs`、`artifacts`、`approvals`（Stage 3/4），
 以及 `tool_calls`、`code_changes`、`test_runs`、`review_findings`、`audit_logs`。
 
 几条容易踩的约定：
@@ -249,8 +285,8 @@ Authorization: Bearer <access_token>
 | 阶段 | 目标 | 状态 |
 |---|---|---|
 | Stage 1 | 基础 API + 用户/项目/需求 CRUD + 统一错误 + pytest | ✅ 已完成 |
-| Stage 2 | JWT 认证、密码哈希接入、Owner/Developer 角色、资源级权限、幂等键 | 🔄 进行中（认证 / 会话撤销 / 资源级权限 / 用户模块鉴权已完成；**工作流幂等键待做**，需先建 `workflow_runs` 表） |
-| Stage 3 | LLM Provider 抽象、Product / Architect Agent、结构化输出校验、Agent Run 记录 | 待开始 |
+| Stage 2 | JWT 认证、密码哈希接入、Owner/Developer 角色、资源级权限、幂等键 | ✅ 已完成 |
+| Stage 3 | LLM Provider 抽象、Product / Architect Agent、结构化输出校验、Agent Run 记录 | 下一步 |
 | Stage 4 | 工作流状态机、Developer / Tester / Reviewer、Tool Gateway、审批、交付物汇总 | 待开始 |
 | Stage 5 | Redis 限流、SSE、真实测试执行、Alembic、MySQL 兼容、简易 Web UI（可选增强） | 不阻塞交付 |
 

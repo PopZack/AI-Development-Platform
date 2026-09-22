@@ -6,7 +6,12 @@ import pytest
 
 from app.common.exceptions import ConflictError
 from app.domain.enums import RequirementStatus
-from app.domain.requirement import ensure_editable, ensure_transition, is_terminal
+from app.domain.requirement import (
+    ensure_editable,
+    ensure_runnable,
+    ensure_transition,
+    is_terminal,
+)
 
 
 def test_draft_can_start_analysis() -> None:
@@ -46,3 +51,23 @@ def test_finished_requirement_is_not_editable(status: RequirementStatus) -> None
 
     assert excinfo.value.code == "REQUIREMENT_NOT_EDITABLE"
     assert excinfo.value.status_code == 409
+
+
+def test_open_requirement_is_runnable() -> None:
+    ensure_runnable(RequirementStatus.DRAFT)
+    ensure_runnable(RequirementStatus.DESIGNED)
+    # FAILED 不在「已关闭」里 —— 失败的需求修完之后应该能重跑
+    ensure_runnable(RequirementStatus.FAILED)
+
+
+@pytest.mark.parametrize("status", [RequirementStatus.COMPLETED, RequirementStatus.CANCELLED])
+def test_closed_requirement_cannot_start_a_new_run(status: RequirementStatus) -> None:
+    """与「不可编辑」共用同一组状态，但错误码分开。
+
+    如果两者共用一个码，前端就只能靠 message 字符串判断是「不能改」还是「不能再跑」。
+    """
+    with pytest.raises(ConflictError) as excinfo:
+        ensure_runnable(status)
+
+    assert excinfo.value.code == "REQUIREMENT_NOT_RUNNABLE"
+    assert excinfo.value.details["current_status"] == str(status)

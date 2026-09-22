@@ -31,6 +31,7 @@ from app.config.settings import Settings
 from app.infrastructure.db.base import Base
 from app.infrastructure.db.session import configure_database, get_session_factory
 from app.main import create_app
+from app.models.requirement import Requirement
 from app.models.user import User
 
 API = "/api/v1"
@@ -95,6 +96,23 @@ async def set_user_status(db_session: AsyncSession) -> Callable[..., Awaitable[N
         user = await db_session.get(User, UUID(user_id))
         assert user is not None, f"user {user_id} not found"
         user.status = status
+        await db_session.commit()
+
+    return _set
+
+
+@pytest.fixture
+async def set_requirement_status(db_session: AsyncSession) -> Callable[..., Awaitable[None]]:
+    """直接改库设置需求状态。
+
+    状态迁移本来应该由 Workflow Service 推动（Stage 4），Stage 2 还没有那条路径，
+    但「已关闭的需求不能起新工作流」这条规则需要被覆盖，所以直接从库里造状态。
+    """
+
+    async def _set(requirement_id: str, status: str) -> None:
+        requirement = await db_session.get(Requirement, UUID(requirement_id))
+        assert requirement is not None, f"requirement {requirement_id} not found"
+        requirement.status = status
         await db_session.commit()
 
     return _set

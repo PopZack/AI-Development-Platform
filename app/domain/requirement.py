@@ -14,10 +14,11 @@ from app.domain.enums import RequirementStatus
 
 __all__ = [
     "REQUIREMENT_TRANSITIONS",
-    "NON_EDITABLE_STATUSES",
+    "CLOSED_STATUSES",
     "can_transition",
     "ensure_transition",
     "ensure_editable",
+    "ensure_runnable",
     "is_terminal",
 ]
 
@@ -35,19 +36,36 @@ REQUIREMENT_TRANSITIONS: dict[RequirementStatus, frozenset[RequirementStatus]] =
     RequirementStatus.CANCELLED: frozenset(),
 }
 
-# 终态需求不允许再改内容 —— 否则已经生成的 PRD / 架构会悄悄失效，
-# 而 version 字段也就失去了意义
-NON_EDITABLE_STATUSES: frozenset[RequirementStatus] = frozenset(
+# 「已经关掉」的需求：内容不许再改（否则已生成的 PRD / 架构会悄悄失效，
+# version 字段也失去意义），工作流也不许再起一条。
+#
+# WORKFLOW 失败（FAILED）刻意不在其中 —— 失败的需求修完之后应该能重跑。
+CLOSED_STATUSES: frozenset[RequirementStatus] = frozenset(
     {RequirementStatus.COMPLETED, RequirementStatus.CANCELLED}
 )
 
 
 def ensure_editable(status: RequirementStatus) -> None:
     """需求内容是否还允许修改。"""
-    if status in NON_EDITABLE_STATUSES:
+    if status in CLOSED_STATUSES:
         raise ConflictError(
             f"Requirement in status {status} can no longer be modified",
             code="REQUIREMENT_NOT_EDITABLE",
+            details={"current_status": str(status)},
+        )
+
+
+def ensure_runnable(status: RequirementStatus) -> None:
+    """是否还能为这份需求新建一条工作流。
+
+    和 ``ensure_editable`` 共用同一组状态，但**错误码分开**：
+    「需求不能改」和「需求不能再跑」对调用方是两件事，合成一个码会让
+    前端只能靠 message 字符串判断。
+    """
+    if status in CLOSED_STATUSES:
+        raise ConflictError(
+            f"Requirement in status {status} cannot start a new workflow run",
+            code="REQUIREMENT_NOT_RUNNABLE",
             details={"current_status": str(status)},
         )
 

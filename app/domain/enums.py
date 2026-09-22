@@ -23,6 +23,7 @@ __all__ = [
     "RequirementPriority",
     "RequirementStatus",
     "WorkflowStatus",
+    "WorkflowStep",
 ]
 
 
@@ -112,3 +113,31 @@ class WorkflowStatus(StrEnum):
 WORKFLOW_TERMINAL_STATUSES: frozenset[WorkflowStatus] = frozenset(
     {WorkflowStatus.COMPLETED, WorkflowStatus.FAILED, WorkflowStatus.CANCELLED}
 )
+
+
+class WorkflowStep(StrEnum):
+    """工作流内部更细的执行步骤。
+
+    设计文档 §6.3 里 ``workflow_runs`` 同时有 ``status`` 和 ``current_step``，
+    两个都是 NOT NULL，但**文档从头到尾没说它们的区别**。这里的划分是：
+
+    - ``WorkflowStatus``：§3.3 那台状态机，对外可见的**阶段**
+    - ``WorkflowStep``：该阶段内部正在等哪个环节，是**排障用的粒度**
+
+    文档 §12.2 把一个「启动工作流」拆成 7 步，那种粒度就是 current_step 该有的样子：
+    出错时你要能一眼看出卡在 Product Agent 还是 Tool Gateway，而不是只知道「在
+    IMPLEMENTING 阶段」。
+    """
+
+    PENDING = "PENDING"
+    """已创建工作流，尚未开始执行。"""
+
+    PRODUCT_AGENT = "PRODUCT_AGENT"
+    ARCHITECT_AGENT = "ARCHITECT_AGENT"
+    DEVELOPER_AGENT = "DEVELOPER_AGENT"
+    TOOL_GATEWAY = "TOOL_GATEWAY"
+    TESTER_AGENT = "TESTER_AGENT"
+    REVIEWER_AGENT = "REVIEWER_AGENT"
+    APPROVAL = "APPROVAL"
+
+    DONE = "DONE"

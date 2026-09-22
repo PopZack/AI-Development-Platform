@@ -19,6 +19,7 @@ from app.application.auth_service import AuthService
 from app.application.project_service import ProjectService
 from app.application.requirement_service import RequirementService
 from app.application.user_service import UserService
+from app.application.workflow_service import WorkflowService
 from app.common.exceptions import AuthenticationError
 from app.config.settings import Settings
 from app.infrastructure.db.session import get_session
@@ -31,6 +32,7 @@ __all__ = [
     "UserServiceDep",
     "ProjectServiceDep",
     "RequirementServiceDep",
+    "WorkflowServiceDep",
     "CurrentUserDep",
     "LimitQuery",
     "OffsetQuery",
@@ -68,10 +70,15 @@ def get_requirement_service(session: SessionDep) -> RequirementService:
     return RequirementService(session)
 
 
+def get_workflow_service(session: SessionDep) -> WorkflowService:
+    return WorkflowService(session)
+
+
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
 UserServiceDep = Annotated[UserService, Depends(get_user_service)]
 ProjectServiceDep = Annotated[ProjectService, Depends(get_project_service)]
 RequirementServiceDep = Annotated[RequirementService, Depends(get_requirement_service)]
+WorkflowServiceDep = Annotated[WorkflowService, Depends(get_workflow_service)]
 
 # auto_error=False 是刻意的：HTTPBearer 默认的失败行为是抛 403 且响应体不符合
 # 我们的统一错误结构。关掉它，由我们自己抛 AuthenticationError（401 + 统一错误体）。
