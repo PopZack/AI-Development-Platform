@@ -216,3 +216,19 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ============ AI Dev Team 项目专用 ============
+# uv 管理的虚拟环境
+.venv/
+
+# 本地 SQLite 数据库（Stage 1 的 ./data/ai_dev_team.db）
+data/
+*.db
+*.db-journal
+
+# Stage 4 的本地隔离工作区：Tool Gateway 的授权根目录，内容都是运行时产物
+workspace/
+
+# 设计文档：本地参考资料，刻意不入版本库。
+# 不加这一行的话 git status 会一直显示 "?? design_docs/"，久了就没人看 status 了。
+design_docs/
