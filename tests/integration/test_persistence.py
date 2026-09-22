@@ -23,31 +23,34 @@ from tests.conftest import API
 async def test_created_objects_are_persisted_and_rereadable(
     client: AsyncClient,
     db_session: AsyncSession,
-    make_user: object,
+    make_actor: object,
     make_project: object,
     make_requirement: object,
 ) -> None:
     """文档 §11 Stage 1 验收：数据可以保存到数据库并重新读取。"""
-    owner = await make_user(email="persist@example.com")
-    project = await make_project(owner["id"], name="Persisted Project")
-    requirement = await make_requirement(project["id"], owner["id"], title="Persisted Req")
+    actor = await make_actor(email="persist@example.com")
+    project = await make_project(actor["headers"], name="Persisted Project")
+    requirement = await make_requirement(project["id"], actor["headers"], title="Persisted Req")
 
     project_row = await db_session.get(Project, UUID(project["id"]))
     assert project_row is not None
     assert project_row.name == "Persisted Project"
     assert project_row.slug == "persisted-project"
     assert project_row.created_at is not None
+    # owner 来自令牌，不是请求体
+    assert str(project_row.owner_id) == actor["user"]["id"]
 
     requirement_row = await db_session.get(Requirement, UUID(requirement["id"]))
     assert requirement_row is not None
     assert requirement_row.title == "Persisted Req"
     assert requirement_row.status == "DRAFT"
     assert requirement_row.version == 1
+    assert str(requirement_row.created_by) == actor["user"]["id"]
     assert requirement_row.acceptance_criteria_json == ["可以创建 Todo", "可以查询 Todo 列表"]
     # Stage 3 之前 PRD 必须保持为空，绝不能有半成品写进去
     assert requirement_row.prd_json is None
 
-    via_api = (await client.get(f"{API}/requirements/{requirement['id']}")).json()
+    via_api = (await client.get(f"{API}/requirements/{requirement['id']}", headers=actor["headers"])).json()
     assert via_api["title"] == "Persisted Req"
     assert via_api["acceptance_criteria"] == ["可以创建 Todo", "可以查询 Todo 列表"]
 
@@ -83,7 +86,7 @@ async def test_duplicate_email_does_not_write_a_partial_row(
 async def test_failed_project_creation_leaves_no_orphan_member(
     client: AsyncClient,
     db_session: AsyncSession,
-    make_user: object,
+    make_actor: object,
     make_project: object,
 ) -> None:
     """slug 冲突时整体失败：项目不能建出来，成员行也不能偷偷留下。
@@ -91,14 +94,15 @@ async def test_failed_project_creation_leaves_no_orphan_member(
     这是「事务边界归 Service」最容易出错的地方 —— 两次 add 只 commit 一次，
     顺序反了就会出现没有 Owner 的孤儿项目。
     """
-    owner = await make_user()
-    await make_project(owner["id"], slug="atomic-slug")
+    actor = await make_actor()
+    await make_project(actor["headers"], slug="atomic-slug")
 
     members_before = (await db_session.execute(select(func.count()).select_from(ProjectMember))).scalar_one()
 
     response = await client.post(
         f"{API}/projects",
-        json={"name": "Conflict", "slug": "atomic-slug", "owner_id": owner["id"]},
+        json={"name": "Conflict", "slug": "atomic-slug"},
+        headers=actor["headers"],
     )
     assert response.status_code == 409
 
@@ -110,16 +114,16 @@ async def test_failed_project_creation_leaves_no_orphan_member(
 
 
 async def test_project_member_unique_constraint_is_enforced_by_database(
-    client: AsyncClient, db_session: AsyncSession, make_user: object, make_project: object
+    client: AsyncClient, db_session: AsyncSession, make_actor: object, make_project: object
 ) -> None:
     """绕过 Service 直接插重复成员，数据库的唯一约束必须挡住。
 
     Service 层的重复检查是「友好提示」，不是「正确性保证」—— 并发下靠的是
     UNIQUE(project_id, user_id)。
     """
-    owner = await make_user()
-    project = await make_project(owner["id"])
-    duplicate = ProjectMember(project_id=UUID(project["id"]), user_id=UUID(owner["id"]), role="OWNER")
+    actor = await make_actor()
+    project = await make_project(actor["headers"])
+    duplicate = ProjectMember(project_id=UUID(project["id"]), user_id=UUID(actor["user"]["id"]), role="OWNER")
 
     db_session.add(duplicate)
     with pytest.raises(IntegrityError):

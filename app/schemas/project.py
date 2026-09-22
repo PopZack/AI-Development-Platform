@@ -1,9 +1,11 @@
 """项目 / 项目成员相关请求与响应模型。
 
-关于 ``owner_id``：Stage 1 没有认证，创建项目时由客户端显式指定 owner。
-这**不是一个安全的做法**，只是让 Stage 1 能在无 JWT 的前提下跑通
-「创建项目 → 成为 Owner」这条流程（文档 §3.2 流程 A）。Stage 2 引入 JWT 后，
-owner 一律取自令牌主体，``ProjectCreate.owner_id`` 会被移除。
+关于 ``owner_id``：它**只在响应里出现，不在请求里**。
+
+Stage 1 因为还没有认证，创建项目时由客户端显式指定 owner —— 那是个临时做法。
+Stage 2 起 owner 一律取自 JWT 主体，``ProjectCreate.owner_id`` 已删除。注意这不是
+「服务端忽略客户端传的值」，而是请求体里**根本没有这个入口**：前者仍然要求调用方
+理解一个无意义的字段，后者直接让提权尝试无从写起。
 """
 
 from __future__ import annotations
@@ -35,7 +37,6 @@ class ProjectCreate(BaseModel):
         description="URL 标识。不传则根据 name 自动生成；传入则必须是 kebab-case",
     )
     description: str | None = None
-    owner_id: UUID = Field(description="Stage 1 由客户端指定；Stage 2 起改为取 JWT 主体")
 
     @field_validator("slug")
     @classmethod

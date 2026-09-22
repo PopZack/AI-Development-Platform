@@ -153,10 +153,12 @@ def make_actor(client: AsyncClient, auth_headers: AuthHeaders) -> MakeActor:
 
 @pytest.fixture
 def make_project(client: AsyncClient) -> MakeProject:
-    async def _make(owner_id: str, **overrides: Any) -> dict[str, Any]:
-        payload: dict[str, Any] = {"name": "Todo API Demo", "owner_id": owner_id}
+    """``make_project(headers, **overrides)`` —— owner 由令牌决定，不再需要传 id。"""
+
+    async def _make(headers: dict[str, str], **overrides: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = {"name": "Todo API Demo"}
         payload.update(overrides)
-        response = await client.post(f"{API}/projects", json=payload)
+        response = await client.post(f"{API}/projects", json=payload, headers=headers)
         assert response.status_code == 201, response.text
         return response.json()
 
@@ -165,17 +167,44 @@ def make_project(client: AsyncClient) -> MakeProject:
 
 @pytest.fixture
 def make_requirement(client: AsyncClient) -> MakeRequirement:
-    async def _make(project_id: str, created_by: str, **overrides: Any) -> dict[str, Any]:
+    """``make_requirement(project_id, headers, **overrides)`` —— 创建人由令牌决定。"""
+
+    async def _make(project_id: str, headers: dict[str, str], **overrides: Any) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "title": "实现 Todo API",
             "description": "使用 FastAPI 和 SQLAlchemy 实现 Todo 的增删改查。",
             "priority": "P0",
             "acceptance_criteria": ["可以创建 Todo", "可以查询 Todo 列表"],
-            "created_by": created_by,
         }
         payload.update(overrides)
-        response = await client.post(f"{API}/projects/{project_id}/requirements", json=payload)
+        response = await client.post(
+            f"{API}/projects/{project_id}/requirements", json=payload, headers=headers
+        )
         assert response.status_code == 201, response.text
         return response.json()
+
+    return _make
+
+
+@pytest.fixture
+def make_project_with_member(
+    client: AsyncClient, make_project: object, make_actor: object
+) -> Callable[..., Awaitable[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]]]:
+    """一次造出「OWNER + 项目 + 另一个已加入的成员」，返回三方，省掉权限类用例的样板。
+
+    返回 ``(owner_actor, project, member_actor)``。
+    """
+
+    async def _make(role: str = "DEVELOPER", **project_overrides: Any) -> tuple[Any, Any, Any]:
+        owner = await make_actor()
+        project = await make_project(owner["headers"], **project_overrides)
+        member = await make_actor()
+        response = await client.post(
+            f"{API}/projects/{project['id']}/members",
+            json={"user_id": member["user"]["id"], "role": role},
+            headers=owner["headers"],
+        )
+        assert response.status_code == 201, response.text
+        return owner, project, member
 
     return _make

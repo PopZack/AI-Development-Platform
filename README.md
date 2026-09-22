@@ -116,29 +116,42 @@ app/
 | POST | `/auth/logout` | **是** | 登出，撤销该用户**全部**会话 |
 | POST | `/auth/password` | **是** | 改密码，并连带撤销全部会话 |
 
-### 业务资源（Stage 1，尚未强制认证）
+### 项目与需求（Stage 2，已接资源级权限）
 
-> ⚠️ 这一组接口目前**还没有接认证与资源级权限** —— 给它们加上鉴权是 Stage 2 的下一个提交。
-> 在那之前不要把服务部署到任何共享环境。
+| Method | Path | 要求 | 说明 |
+|---|---|---|---|
+| POST | `/projects` | 登录 | 创建者自动成为 Owner。**owner 取自令牌，请求体里没有这个字段** |
+| GET | `/projects` | 登录 | 只返回自己参与的项目。**没有**「查看别人列表」的开关 |
+| GET | `/projects/{id}` | 项目成员 | |
+| PATCH | `/projects/{id}` | **OWNER** | |
+| GET | `/projects/{id}/members` | 项目成员 | |
+| POST | `/projects/{id}/members` | **OWNER** | |
+| POST | `/projects/{id}/requirements` | **OWNER / DEVELOPER** | **created_by 取自令牌** |
+| GET | `/projects/{id}/requirements` | 项目成员 | |
+| GET | `/requirements/{id}` | 该需求所属项目的成员 | |
+| PATCH | `/requirements/{id}` | **OWNER / DEVELOPER** | 内容变更会使 version 自增 |
 
-| Method | Path | 说明 |
-|---|---|---|
-| GET | `/users` | 用户列表 |
-| GET | `/users/{user_id}` | 用户详情 |
-| PATCH | `/users/{user_id}` | 修改用户 |
-| POST | `/projects` | 创建项目（创建者自动成为 Owner） |
-| GET | `/projects` | 项目列表（可按 `owner_id` 过滤） |
-| GET | `/projects/{project_id}` | 项目详情 |
-| PATCH | `/projects/{project_id}` | 修改项目 |
-| GET | `/projects/{project_id}/members` | 成员列表 |
-| POST | `/projects/{project_id}/members` | 添加成员 |
-| POST | `/projects/{project_id}/requirements` | 创建需求 |
-| GET | `/projects/{project_id}/requirements` | 项目下的需求列表 |
-| GET | `/requirements/{requirement_id}` | 需求详情 |
-| PATCH | `/requirements/{requirement_id}` | 修改需求（内容变更会使 version 自增） |
+`POST /users` 与 `GET/PATCH /users/*` 仍在收尾（见文末「尚未收掉的短板」）。
+注册统一走 `/auth/register` —— 同一个业务动作保留两条入口，两边的校验规则迟早会走偏。
 
-`POST /users` 已在 Stage 2 下线，注册统一走 `/auth/register` —— 同一个业务动作保留两条
-入口，两边的校验规则迟早会走偏（比如一边统一小写邮箱、另一边忘了）。
+### 权限模型
+
+只有 **项目级** 角色，没有全局管理员（设计文档只定义了 Owner / Developer）：
+
+| 角色 | 读项目 | 读需求 | 建/改需求 | 改项目 · 管成员 |
+|---|---|---|---|---|
+| OWNER | ✅ | ✅ | ✅ | ✅ |
+| DEVELOPER | ✅ | ✅ | ✅ | ❌ 403 |
+| VIEWER | ✅ | ✅ | ❌ 403 | ❌ 403 |
+| 非成员 | ❌ 403 | ❌ 403 | ❌ 403 | ❌ 403 |
+
+两条值得说明的取舍：
+
+- **越权返回 403，不伪装成 404。** 项目 ID 是 UUID 不可枚举，泄露「资源存在」的风险很低，
+  而 403 对排查问题明显更有帮助。代价是调用方能区分「不存在」和「没权限」——
+  如果哪天 ID 变成可枚举的，应该改成对外 404。
+- **角色不足时，响应里带上实际角色和所需角色**（`details.actual_role` / `details.required_roles`）。
+  前端因此不用靠猜，也不用去翻文档 —— 文档会和代码走偏，报错不会。
 
 ### 鉴权方式
 
@@ -228,7 +241,7 @@ Authorization: Bearer <access_token>
 | 阶段 | 目标 | 状态 |
 |---|---|---|
 | Stage 1 | 基础 API + 用户/项目/需求 CRUD + 统一错误 + pytest | ✅ 已完成 |
-| Stage 2 | JWT 认证、密码哈希接入、Owner/Developer 角色、资源级权限、幂等键 | 🔄 进行中（认证与会话撤销已完成；资源级权限、幂等键待做） |
+| Stage 2 | JWT 认证、密码哈希接入、Owner/Developer 角色、资源级权限、幂等键 | 🔄 进行中（认证、会话撤销、资源级权限已完成；用户模块收紧、幂等键待做） |
 | Stage 3 | LLM Provider 抽象、Product / Architect Agent、结构化输出校验、Agent Run 记录 | 待开始 |
 | Stage 4 | 工作流状态机、Developer / Tester / Reviewer、Tool Gateway、审批、交付物汇总 | 待开始 |
 | Stage 5 | Redis 限流、SSE、真实测试执行、Alembic、MySQL 兼容、简易 Web UI（可选增强） | 不阻塞交付 |
@@ -260,8 +273,9 @@ Authorization: Bearer <access_token>
 
 ## 尚未收掉的短板
 
-- **业务资源接口还没有鉴权**：`/users`、`/projects`、`/requirements` 三个模块
-  目前不要求登录，`POST /projects` 和 `POST /requirements` 的 `owner_id` / `created_by`
-  仍由客户端指定，`GET /projects` 不带参数会列出全部项目。
-  给它们加上认证 + 资源级权限是 **Stage 2 的下一个提交**。在那之前不要部署到共享环境。
-- `POST /users` 已下线，注册统一走 `/auth/register`（避免同一个动作有两条入口）。
+- **`/users` 三个接口还没有鉴权**：`GET /users`、`GET /users/{id}`、`PATCH /users/{id}`
+  目前不要求登录，且 `PATCH` 能改 `status` —— 等于任何人都能停用任何账号。
+  这是 Stage 2 的最后一个提交（`GET` 需登录、`PATCH` 收紧为仅本人且只允许改 `display_name`）。
+- 账号停用（`UserStatus.DISABLED`）目前**没有 API 入口**：设计文档只定义了项目级角色，
+  没有全局管理员，所以不凭空造一个。`ACCOUNT_DISABLED` 分支保留在认证层
+  （手工改库或将来有管理功能时立刻生效），测试通过直连改库来构造该状态。

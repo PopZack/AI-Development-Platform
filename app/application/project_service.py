@@ -2,9 +2,16 @@
 
 Layer: Application（Service）。
 
-这里能看清「事务边界归 Service」的实际含义：创建项目要写两张表
-（projects + project_members），两次 ``add`` 之后只 ``commit`` 一次。
-如果第二步失败，第一步也会一起回滚，不会留下一个没有 Owner 的孤儿项目。
+两个关键约束，都是这个提交要落实的：
+
+1. **owner 取自 JWT 主体，不接受客户端指定。** 允许客户端传 ``owner_id`` 等于给了
+   提权入口：任何登录用户都能创建一个「归属别人」的项目，而文档 §11 Stage 2 的验收项
+   「用户不能访问不属于自己的项目」也就永远不可能真正成立。
+2. **每个方法都要求显式传入 ``actor``。** 不提供省略身份的重载 —— 让「必须知道
+   是谁在操作」在函数签名上就看得见，而不是靠调用方自觉。
+
+事务边界仍然只在这一层：创建项目要写两张表（projects + project_members），
+两次 ``add`` 之后只 ``commit`` 一次，避免留下没有 Owner 的孤儿项目。
 """
 
 from __future__ import annotations
@@ -14,10 +21,13 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.project_access import ProjectAccessGuard
 from app.common.exceptions import ConflictError, NotFoundError
 from app.common.utils import random_suffix, slugify
-from app.domain.enums import ProjectRole, ProjectStatus, UserStatus
+from app.domain.enums import ProjectRole, ProjectStatus
+from app.domain.project import MANAGE_ROLES, READ_ROLES
 from app.models.project import Project, ProjectMember
+from app.models.user import User
 from app.repositories.project_repository import ProjectMemberRepository, ProjectRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.project import ProjectCreate, ProjectMemberCreate, ProjectUpdate
@@ -35,41 +45,36 @@ class ProjectService:
         self._projects = ProjectRepository(session)
         self._members = ProjectMemberRepository(session)
         self._users = UserRepository(session)
+        self._access = ProjectAccessGuard(session)
 
-    async def create_project(self, payload: ProjectCreate) -> Project:
-        owner = await self._users.get(payload.owner_id)
-        if owner is None:
-            raise NotFoundError.for_resource("USER", "Project owner does not exist")
-        if owner.status != UserStatus.ACTIVE:
-            raise ConflictError(
-                "Project owner account is not active",
-                code="OWNER_NOT_ACTIVE",
-                details={"owner_id": str(owner.id), "owner_status": owner.status},
-            )
+    # ------------------------------------------------------------------ 创建
 
+    async def create_project(self, payload: ProjectCreate, *, actor: User) -> Project:
         slug = await self._resolve_slug(payload)
 
+        # owner 只可能来自令牌主体。注意 payload 里已经没有 owner_id 这个字段了 ——
+        # 不是「忽略客户端传的值」，而是根本没有这个入口
         project = Project(
             name=payload.name.strip(),
             slug=slug,
             description=payload.description,
-            owner_id=owner.id,
+            owner_id=actor.id,
             status=ProjectStatus.ACTIVE.value,
         )
         await self._projects.add(project)
 
-        # 文档 §3.2 流程 A：创建项目后当前用户成为项目 Owner
+        # 文档 §3.2 流程 A：创建项目后当前用户成为项目 Owner。
+        # 这一行和上面共用同一个事务 —— 少了它，创建者反而进不去自己的项目
         await self._members.add(
             ProjectMember(
                 project_id=project.id,
-                user_id=owner.id,
+                user_id=actor.id,
                 role=ProjectRole.OWNER.value,
             )
         )
 
-        # 唯一的提交点：上面两个 insert 在一个事务里
         await self._session.commit()
-        logger.info("project created | id=%s slug=%s owner=%s", project.id, project.slug, owner.id)
+        logger.info("project created | id=%s slug=%s owner=%s", project.id, project.slug, actor.id)
         return project
 
     async def _resolve_slug(self, payload: ProjectCreate) -> str:
@@ -97,29 +102,32 @@ class ProjectService:
             details={"base_slug": base, "attempts": _SLUG_ATTEMPTS},
         )
 
-    async def get_project(self, project_id: UUID) -> Project:
-        project = await self._projects.get(project_id)
-        if project is None:
-            raise NotFoundError.for_resource("PROJECT", "Project does not exist")
+    # ------------------------------------------------------------------ 读取
+
+    async def get_project(self, project_id: UUID, *, actor: User) -> Project:
+        project = await self._access.load_project(project_id)
+        await self._access.require(project, actor, READ_ROLES, action="read this project")
         return project
 
     async def list_projects(
-        self, *, owner_id: UUID | None = None, limit: int = 50, offset: int = 0
+        self, *, actor: User, limit: int = 50, offset: int = 0
     ) -> tuple[list[Project], int]:
-        """``owner_id`` 传了就按成员关系过滤，不传就列全部。
+        """只返回 ``actor`` 参与的项目。
 
-        Stage 1 靠调用方自觉；Stage 2 起这个参数由 JWT 主体填充，不再可选。
+        Stage 1 的 ``owner_id`` 查询参数已删除 —— 那个参数让调用方可以指定「看谁的
+        项目列表」，而列表内容的可见范围不该由请求参数决定。现在是登录即可，
+        但范围内的项目永远只可能是自己参与的。
         """
-        if owner_id is not None:
-            projects = await self._projects.list_for_user(owner_id, limit=limit, offset=offset)
-            total = await self._projects.count_for_user(owner_id)
-            return projects, total
-        projects = await self._projects.list_all(limit=limit, offset=offset)
-        total = await self._projects.count_all()
+        projects = await self._projects.list_for_user(actor.id, limit=limit, offset=offset)
+        total = await self._projects.count_for_user(actor.id)
         return projects, total
 
-    async def update_project(self, project_id: UUID, payload: ProjectUpdate) -> Project:
-        project = await self.get_project(project_id)
+    # ------------------------------------------------------------------ 修改
+
+    async def update_project(self, project_id: UUID, payload: ProjectUpdate, *, actor: User) -> Project:
+        project = await self._access.load_project(project_id)
+        await self._access.require(project, actor, MANAGE_ROLES, action="update this project")
+
         changes = payload.model_dump(exclude_unset=True)
 
         # slug 刻意不允许修改：它是对外标识，改了会让已有链接失效
@@ -133,8 +141,13 @@ class ProjectService:
         await self._session.commit()
         return project
 
-    async def add_member(self, project_id: UUID, payload: ProjectMemberCreate) -> ProjectMember:
-        project = await self.get_project(project_id)
+    # ------------------------------------------------------------------ 成员
+
+    async def add_member(
+        self, project_id: UUID, payload: ProjectMemberCreate, *, actor: User
+    ) -> ProjectMember:
+        project = await self._access.load_project(project_id)
+        await self._access.require(project, actor, MANAGE_ROLES, action="manage members")
 
         user = await self._users.get(payload.user_id)
         if user is None:
@@ -163,12 +176,10 @@ class ProjectService:
         )
         await self._members.add(member)
         await self._session.commit()
+        logger.info("member added | project=%s user=%s role=%s", project_id, payload.user_id, payload.role)
         return member
 
-    async def list_members(self, project_id: UUID) -> list[ProjectMember]:
-        await self.get_project(project_id)
+    async def list_members(self, project_id: UUID, *, actor: User) -> list[ProjectMember]:
+        project = await self._access.load_project(project_id)
+        await self._access.require(project, actor, READ_ROLES, action="read project members")
         return await self._members.list_by_project(project_id)
-
-    async def get_membership(self, project_id: UUID, user_id: UUID) -> ProjectMember | None:
-        """给 Stage 2 的权限依赖用：非成员返回 None，由上层决定是 403 还是 404。"""
-        return await self._members.get_member(project_id, user_id)

@@ -2,13 +2,14 @@
 
 Layer: Repository。
 
-注意 ``list_for_user``：Stage 1 没有权限系统，所以列表按「是否指定 user_id」
-分流；Stage 2 引入 JWT 后，这个方法的入参将固定为当前登录用户，
-查询逻辑本身不用改 —— 这正是把「按人过滤」放进 Repository 而不是 Router 的收益。
+``list_for_user`` 是项目列表的**唯一**入口：Stage 1 它是个可选的过滤开关，
+Stage 2 起它的入参固定为当前登录用户。查询逻辑一行没改 —— 这正是当初把
+「按人过滤」放进 Repository 而不是 Router 的收益。
 """
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -17,6 +18,11 @@ from app.models.project import Project, ProjectMember
 from app.repositories.base import BaseRepository
 
 __all__ = ["ProjectRepository", "ProjectMemberRepository"]
+
+_UNSCOPED_LISTING_ERROR = (
+    "ProjectRepository.{name}() is intentionally disabled: project listing must always be "
+    "scoped by membership. Use list_for_user(user_id) / count_for_user(user_id) instead."
+)
 
 
 class ProjectRepository(BaseRepository[Project]):
@@ -45,6 +51,16 @@ class ProjectRepository(BaseRepository[Project]):
             .where(ProjectMember.user_id == user_id)
         )
         return int((await self.session.execute(stmt)).scalar_one())
+
+    # 继承来的 list_all() / count_all() 会返回**全部**项目，绕过成员过滤。
+    # 这两个方法在本类上没有合法用途，所以直接堵死而不是留一句注释 ——
+    # 注释拦不住下一个人顺手调用它，而 Stage 2 的核心验收项正是
+    # 「用户不能访问不属于自己的项目」。
+    async def list_all(self, **kwargs: Any) -> list[Project]:
+        raise NotImplementedError(_UNSCOPED_LISTING_ERROR.format(name="list_all"))
+
+    async def count_all(self, **kwargs: Any) -> int:
+        raise NotImplementedError(_UNSCOPED_LISTING_ERROR.format(name="count_all"))
 
 
 class ProjectMemberRepository(BaseRepository[ProjectMember]):
