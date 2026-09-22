@@ -463,6 +463,33 @@ app/infrastructure/tools/
 对应地 `tool_calls.status` 里 `APPROVAL_REQUIRED` 与 `DENIED` 是两个独立取值，
 审批流程要能从审计里筛出来，靠的就是这一条。
 
+### 补丁工具与审批闭环（L2 / L4）
+
+```
+1. generate_patch (L2)  只生成 unified diff，不写盘 —— 让人先看到要改什么
+2. apply_patch   (L4)   第一次调用不带 approval_id → 自动发起审批（409 返回 approval_id）
+3. OWNER 批准
+4. 再带 approval_id 重试 → 真正写盘
+5. 再试一次             → 403 APPROVAL_ALREADY_USED（一条审批只换一次成功执行）
+```
+
+`apply_patch` 的审批校验拆成四个独立错误码，调用方要能分辨「该怎么办」：
+
+| 错误码 | 含义 | 调用方该做什么 |
+|---|---|---|
+| `APPROVAL_NOT_APPROVED` | 还没批 / 已过期 | 等待或重新发起 |
+| `APPROVAL_TOOL_MISMATCH` | 批的是别的工具 | 重新发起 |
+| `APPROVAL_REQUIREMENT_MISMATCH` | 批的是别的需求 | 重新发起 |
+| `APPROVAL_ALREADY_USED` | 已经用过一次 | 确认结果，不要再试 |
+
+两个相关决定：
+
+- **`changes` 用「目标内容」而不是 diff 文本**：应用时直接写目标内容，不用解析 diff
+  （解析 diff 的边界情况多）；Agent 生成「这个文件最终长什么样」比生成
+  「怎么从 A 改到 B」更不容易出错。
+- **审批不是万能通行证**：路径校验在批准之后依然生效 —— 带着合法审批去写
+  工作区外的路径，照样被拒。
+
 ### 人工审批（L4 的「人点头」）
 
 L4 工具被 Gateway 拦下时，**审批记录是自动创建的**（`PENDING`），
