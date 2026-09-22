@@ -16,21 +16,30 @@ Layer: Presentation（Router）。
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Query
 
-from app.common.dependencies import AgentServiceDep, CurrentUserDep, LimitQuery, OffsetQuery
+from app.common.dependencies import (
+    AgentServiceDep,
+    CurrentUserDep,
+    LimitQuery,
+    OffsetQuery,
+    SettingsDep,
+)
 from app.common.openapi import AUTH_ERROR_RESPONSES
-from app.domain.enums import ArtifactType
-from app.schemas.agent import AgentArtifactList, ArtifactRead
+from app.domain.enums import ArtifactType, WorkflowStatus, WorkflowStep
+from app.schemas.agent import (
+    AgentArtifactList,
+    ArtifactRead,
+    DeliverablesSummary,
+    RequirementBrief,
+    WorkflowRunBrief,
+)
 
 router = APIRouter(tags=["agents"])
-
-
-def _to_read(artifact) -> ArtifactRead:
-    return ArtifactRead.from_entity(artifact)
 
 
 @router.post(
@@ -52,7 +61,7 @@ async def analyze_requirement(
     requirement_id: UUID, service: AgentServiceDep, current_user: CurrentUserDep
 ) -> ArtifactRead:
     artifact = await service.analyze_requirement(requirement_id, actor=current_user)
-    return _to_read(artifact)
+    return ArtifactRead.from_entity(artifact)
 
 
 @router.post(
@@ -72,7 +81,7 @@ async def plan_requirement(
     requirement_id: UUID, service: AgentServiceDep, current_user: CurrentUserDep
 ) -> ArtifactRead:
     artifact = await service.plan_requirement(requirement_id, actor=current_user)
-    return _to_read(artifact)
+    return ArtifactRead.from_entity(artifact)
 
 
 @router.get(
@@ -97,4 +106,46 @@ async def list_artifacts(
         limit=limit,
         offset=offset,
     )
-    return AgentArtifactList(items=[_to_read(a) for a in items], total=total)
+    return AgentArtifactList(items=[ArtifactRead.from_entity(a) for a in items], total=total)
+
+
+@router.get(
+    "/requirements/{requirement_id}/deliverables",
+    response_model=DeliverablesSummary,
+    summary="交付物汇总：每种类型取最新版本 + 工作区文件清单",
+    description=(
+        "Stage 4 验收项「用户可以查看完整交付物」的落点：\n\n"
+        "- `deliverables` 按类型取**最新版本**（历史版本用 `/artifacts` 带过滤查）\n"
+        "- `workspace_files` 是工具网关实际写入工作区的文件\n"
+        "- `latest_run` 是最近一次工作流（可能为 null）\n\n"
+        "项目成员（含 VIEWER）可读。"
+    ),
+    responses=AUTH_ERROR_RESPONSES,
+)
+async def get_deliverables_summary(
+    requirement_id: UUID,
+    service: AgentServiceDep,
+    settings: SettingsDep,
+    current_user: CurrentUserDep,
+) -> DeliverablesSummary:
+    summary = await service.deliverables_summary(
+        requirement_id, actor=current_user, workspace_root=Path(settings.workspace_root)
+    )
+    return DeliverablesSummary(
+        requirement=RequirementBrief(
+            id=summary["requirement"].id,
+            title=summary["requirement"].title,
+            status=summary["requirement"].status,
+        ),
+        latest_run=(
+            WorkflowRunBrief(
+                id=summary["latest_run"].id,
+                status=WorkflowStatus(summary["latest_run"].status),
+                current_step=WorkflowStep(summary["latest_run"].current_step),
+            )
+            if summary["latest_run"]
+            else None
+        ),
+        deliverables=[ArtifactRead.from_entity(a) for a in summary["deliverables"]],
+        workspace_files=summary["workspace_files"],
+    )

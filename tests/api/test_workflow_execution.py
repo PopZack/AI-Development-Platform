@@ -324,3 +324,67 @@ async def test_cancel_from_paused_state(client: AsyncClient, app: FastAPI, make_
     # 取消后不能再 resume
     resumed = await client.post(f"{API}/runs/{run['id']}/resume", json={}, headers=owner["headers"])
     assert resumed.status_code == 409
+
+
+async def test_deliverables_summary_aggregates_latest_versions(
+    client: AsyncClient, app: FastAPI, make_actor
+) -> None:
+    """Stage 4 验收项「用户可以查看完整交付物」：每种类型取最新版 + 工作区文件。"""
+    owner = await make_actor()
+    req, run = await _make_run(client, owner)
+
+    provider = _install(
+        app,
+        [
+            _json(GOOD_PRD),
+            _json(GOOD_ARCH),
+            _json(DEVELOPER_PATCH_1),
+            _json(TEST_REPORT_PASS),
+            _json(REVIEW_APPROVED),
+        ],
+    )
+
+    started = await client.post(f"{API}/runs/{run['id']}/start", headers=owner["headers"])
+    approval_id = started.json()["approval_id"]
+    await client.post(f"{API}/approvals/{approval_id}/approve", json={}, headers=owner["headers"])
+    provider.enqueue(_json(TEST_REPORT_PASS))
+    provider.enqueue(_json(REVIEW_APPROVED))
+    await client.post(
+        f"{API}/runs/{run['id']}/resume",
+        json={"approval_id": approval_id},
+        headers=owner["headers"],
+    )
+    await client.post(f"{API}/runs/{run['id']}/approve", headers=owner["headers"])
+
+    summary = await client.get(f"{API}/requirements/{req['id']}/deliverables", headers=owner["headers"])
+    assert summary.status_code == 200, summary.text
+    body = summary.json()
+
+    assert body["requirement"]["status"] == "COMPLETED"
+    assert body["latest_run"]["status"] == "COMPLETED"
+    # 每种类型只有最新一条：5 类型 = 5 条
+    assert [d["type"] for d in body["deliverables"]] == [
+        "PRD",
+        "ARCHITECTURE",
+        "PATCH",
+        "TEST_REPORT",
+        "REVIEW",
+    ]
+    # 工作区文件清单反映的是实际写入
+    assert body["workspace_files"] == ["app/main.py"]
+
+
+async def test_deliverables_summary_without_any_run(
+    client: AsyncClient, app: FastAPI, make_actor, make_project, make_requirement
+) -> None:
+    """刚建的需求也有汇总：空列表 + latest_run 为 null，而不是 404。"""
+    owner = await make_actor()
+    proj = await make_project(owner["headers"])
+    req = await make_requirement(proj["id"], owner["headers"])
+
+    summary = await client.get(f"{API}/requirements/{req['id']}/deliverables", headers=owner["headers"])
+    assert summary.status_code == 200
+    body = summary.json()
+    assert body["deliverables"] == []
+    assert body["latest_run"] is None
+    assert body["workspace_files"] == []

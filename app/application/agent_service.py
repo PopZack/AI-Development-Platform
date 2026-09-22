@@ -32,6 +32,7 @@ Layer: Application（Service）。
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,6 +55,7 @@ from app.models.requirement import Requirement
 from app.models.user import User
 from app.repositories.agent_repository import ArtifactRepository
 from app.repositories.requirement_repository import RequirementRepository
+from app.repositories.workflow_repository import WorkflowRunRepository
 
 __all__ = ["AgentService"]
 
@@ -71,6 +73,7 @@ class AgentService:
         self._session = session
         self._requirements = RequirementRepository(session)
         self._artifacts = ArtifactRepository(session)
+        self._workflows = WorkflowRunRepository(session)
         self._access = ProjectAccessGuard(session)
         self._runtime = AgentRuntime(session, provider, max_output_attempts=max_output_attempts)
 
@@ -191,6 +194,48 @@ class AgentService:
         )
         total = await self._artifacts.count_by_requirement(requirement_id, artifact_type=artifact_type)
         return items, total
+
+    async def deliverables_summary(
+        self, requirement_id: UUID, *, actor: User, workspace_root: Path | None = None
+    ) -> dict:
+        """需求的完整交付物汇总（文档 §13 Stage 4 验收项）。
+
+        按类型取最新版本；历史版本仍走 ``list_artifacts`` 查。
+        工作区文件清单只读 ``settings.workspace_root/req-<id>`` —— 只列名字，
+        不读内容：这是给人看的归档视图，不是给模型的上下文。
+        """
+        requirement = await self._requirements.get(requirement_id)
+        if requirement is None:
+            raise NotFoundError.for_resource("REQUIREMENT", "Requirement does not exist")
+
+        project = await self._access.load_project(requirement.project_id)
+        await self._access.require(project, actor, READ_ROLES, action="read the deliverables of")
+
+        deliverables = [
+            artifact
+            for artifact_type in ArtifactType
+            if (artifact := await self._artifacts.latest(requirement_id, artifact_type)) is not None
+        ]
+        runs = await self._workflows.list_by_requirement(requirement_id)
+        latest_run = runs[-1] if runs else None
+
+        workspace_files: list[str] = []
+        if workspace_root is not None:
+            root = workspace_root / f"req-{requirement_id}"
+            if root.is_dir():
+                workspace_files = sorted(
+                    # as_posix：API 对外返回 portable 路径（Windows 上否则是反斜杠）
+                    p.relative_to(root).as_posix()
+                    for p in root.rglob("*")
+                    if p.is_file()
+                )
+
+        return {
+            "requirement": requirement,
+            "latest_run": latest_run,
+            "deliverables": deliverables,
+            "workspace_files": workspace_files,
+        }
 
     # ------------------------------------------------------------------ 内部
 

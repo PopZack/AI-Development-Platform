@@ -9,10 +9,18 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from app.domain.enums import ArtifactType
+from pydantic import Field
+
+from app.domain.enums import ArtifactType, WorkflowStatus, WorkflowStep
 from app.schemas.common import ReadModel, UtcDateTime
 
-__all__ = ["ArtifactRead", "AgentArtifactList"]
+__all__ = [
+    "AgentArtifactList",
+    "ArtifactRead",
+    "DeliverablesSummary",
+    "RequirementBrief",
+    "WorkflowRunBrief",
+]
 
 
 class ArtifactRead(ReadModel):
@@ -49,3 +57,31 @@ class ArtifactRead(ReadModel):
 class AgentArtifactList(ReadModel):
     items: list[ArtifactRead]
     total: int
+
+
+class RequirementBrief(ReadModel):
+    """交付物汇总里带一份需求摘要，避免调用方再多打一次接口。"""
+
+    id: UUID
+    title: str
+    status: str
+
+
+class WorkflowRunBrief(ReadModel):
+    id: UUID
+    status: WorkflowStatus
+    current_step: WorkflowStep
+
+
+class DeliverablesSummary(ReadModel):
+    """需求的完整交付物汇总（文档 §13 Stage 4 验收：「用户可以查看完整交付物」）。
+
+    - ``deliverables`` 按类型取**最新版本**（历史版本仍可通过
+      ``GET /requirements/{id}/artifacts`` 带过滤查询）
+    - ``workspace_files`` 是工具网关写入工作区的实际文件清单
+    """
+
+    requirement: RequirementBrief
+    latest_run: WorkflowRunBrief | None = None
+    deliverables: list[ArtifactRead]
+    workspace_files: list[str] = Field(default_factory=list)

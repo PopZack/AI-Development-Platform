@@ -182,7 +182,8 @@ Authorization: Bearer <access_token>
 |---|---|---|---|
 | POST | `/requirements/{id}/analyze` | **OWNER / DEVELOPER** | Product Agent 生成 PRD。状态 `DRAFT → ANALYZING` |
 | POST | `/requirements/{id}/plan` | **OWNER / DEVELOPER** | Architect Agent 生成技术设计。状态 `ANALYZING → DESIGNED`，**必须先 analyze** |
-| GET | `/requirements/{id}/artifacts` | 项目成员（含 VIEWER） | 列出交付物，按版本升序，可用 `type=PRD/ARCHITECTURE` 过滤 |
+| GET | `/requirements/{id}/artifacts` | 项目成员（含 VIEWER） | 列出交付物，按版本升序，可用 `type` 过滤 |
+| GET | `/requirements/{id}/deliverables` | 项目成员（含 VIEWER） | **交付物汇总**：每种类型取最新版 + 工作区文件清单 + 最近一次工作流 |
 
 **两个要提前知道的特性：**
 
@@ -624,7 +625,7 @@ APPROVAL_REQUIRED，含入参、结果摘要、错误码、耗时。
 | Stage 1 | 基础 API + 用户/项目/需求 CRUD + 统一错误 + pytest | ✅ 已完成 |
 | Stage 2 | JWT 认证、密码哈希接入、Owner/Developer 角色、资源级权限、幂等键 | ✅ 已完成 |
 | Stage 3 | LLM Provider 抽象、Product / Architect Agent、结构化输出校验、Agent Run 记录 | ✅ 已完成 |
-| Stage 4 | 工作流状态机、Developer / Tester / Reviewer、Tool Gateway、审批、交付物汇总 | 🔄 进行中（Tool Gateway + 补丁闭环 + 审批 + 工作流编排已完成；交付物汇总与收尾待做） |
+| Stage 4 | 工作流状态机、Developer / Tester / Reviewer、Tool Gateway、审批、交付物汇总 | ✅ 已完成（真实测试执行等按文档划入 Stage 5） |
 | Stage 5 | Redis 限流、SSE、真实测试执行、Alembic、MySQL 兼容、简易 Web UI（可选增强） | 不阻塞交付 |
 
 ---
@@ -651,6 +652,25 @@ APPROVAL_REQUIRED，含入参、结果摘要、错误码、耗时。
    是二选一或缺失的，当前实现选择写在代码注释里。
 
 ---
+
+## 已知取舍（不是遗漏，是选择）
+
+### 首期扩展表：只建了 `tool_calls`，其余四张暂缓
+
+文档 §6.1 的原话：「在工具执行和测试闭环实现时增加相关记录表。
+不要为了“完整的企业级表结构”而一次性实现所有表。」按这个原则逐张核对：
+
+| 表 | 决定 | 理由 |
+|---|---|---|
+| `tool_calls` | ✅ 已建 | 工具执行已实现，审计是权限模型的一部分（L1「允许并记录」） |
+| `code_changes` | 暂缓 | PATCH 交付物已完整记录变更内容 + diff，`tool_calls` 有应用结果；
+  独立表在只有单次补丁语义时是纯重复。等出现「多次补丁累积成工作区状态」的需求再建 |
+| `test_runs` | 暂缓 | 文档把「真实的测试工具执行」划入 Stage 5 —— Tester 现在做的是静态核对，
+  没有真实运行就没有运行结果可记，建表只会得到一张永远空着的表 |
+| `review_findings` | 暂缓 | findings 已结构化存在 REVIEW 交付物 JSON 里；跨需求聚合查询（如「最近所有
+  blocker」）出现时再抽表，从 JSON 迁移是机械劳动 |
+| `audit_logs` | 暂缓 | 工具级审计已由 `tool_calls` 覆盖；审批有自己的记录（approvals）。
+  全局操作审计等到有真实合规需求再加 |
 
 ## 已知取舍（不是遗漏，是选择）
 
