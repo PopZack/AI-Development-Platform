@@ -1,8 +1,11 @@
 """用户相关请求 / 响应模型。
 
-注意：Stage 1 尚无认证，创建用户靠 ``POST /users``。
-文档 §7.1 的 ``POST /auth/register`` 会在 Stage 2 落地，届时本模块的
-``UserCreate`` 会被 auth 复用，而不是再定义一个。
+``UserCreate`` 现在只被 ``/auth/register`` 使用（``POST /users`` 已下线）。
+
+``UserUpdate`` **不含 status**：设计文档只定义了项目级角色（Owner / Developer），
+没有全局管理员。保留 status 等于「任何登录用户都能停用任何账号」，而凭空造一个
+admin 角色又是替文档加设计。所以停用账号暂时没有 API 入口 ——
+``ACCOUNT_DISABLED`` 分支保留在认证层，将来有管理功能时立刻生效。
 """
 
 from __future__ import annotations
@@ -24,10 +27,9 @@ class UserCreate(BaseModel):
 
 
 class UserUpdate(BaseModel):
-    """部分更新。所有字段可选，未传表示不改。"""
+    """本人可修改的字段。未传表示不改。"""
 
     display_name: str | None = Field(default=None, min_length=1, max_length=120)
-    status: UserStatus | None = None
 
 
 class UserRead(ReadModel):

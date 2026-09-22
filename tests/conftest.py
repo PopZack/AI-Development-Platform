@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -31,6 +31,7 @@ from app.config.settings import Settings
 from app.infrastructure.db.base import Base
 from app.infrastructure.db.session import configure_database, get_session_factory
 from app.main import create_app
+from app.models.user import User
 
 API = "/api/v1"
 DEFAULT_PASSWORD = "StrongPass123!"
@@ -79,6 +80,24 @@ async def db_session(engine: Any) -> AsyncIterator[AsyncSession]:
     factory: async_sessionmaker[AsyncSession] = get_session_factory()
     async with factory() as session:
         yield session
+
+
+@pytest.fixture
+async def set_user_status(db_session: AsyncSession) -> Callable[..., Awaitable[None]]:
+    """直接改库设置用户状态。
+
+    账号停用**没有 API 入口** —— 设计文档只定义了项目级角色，没有全局管理员，
+    不凭空造一个。但 ``ACCOUNT_DISABLED`` 这条分支仍然需要被覆盖，所以测试
+    绕开接口直接改库（等价于运维手工处理），而不是为了测试方便去开一个后门接口。
+    """
+
+    async def _set(user_id: str, status: str) -> None:
+        user = await db_session.get(User, UUID(user_id))
+        assert user is not None, f"user {user_id} not found"
+        user.status = status
+        await db_session.commit()
+
+    return _set
 
 
 # ---------- 造数据的夹具：让每个用例只写「与它断言相关」的那几个字段 ----------

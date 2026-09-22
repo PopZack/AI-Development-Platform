@@ -1,13 +1,16 @@
 """用户接口。
 
-Layer: Presentation（Router）—— 只做三件事：收请求、交 Service、包响应。
+Layer: Presentation（Router）—— 只做三件事：收请求、传 current_user、转交 Service。
 
-注册入口已由 ``POST /auth/register`` 承接，所以这里的 ``POST /users``
-在 Stage 2 下线了：**同一个业务动作保留两条入口，两边的校验规则迟早会走偏**
-（比如一边统一小写邮箱、另一边忘了）。留下的是查询与修改。
+这里是 Stage 2 收尾时补上鉴权的最后一个模块：
 
-本模块的接口目前尚未强制认证 —— 给业务路由加认证与资源级权限是 Stage 2 的
-下一个提交。在那之前不要部署到任何共享环境。
+| 接口 | 要求 |
+|---|---|
+| ``GET /users`` | 登录（添加成员时得先能查到人） |
+| ``GET /users/{id}`` | 登录 |
+| ``PATCH /users/{id}`` | **仅本人**，且只能改 ``display_name`` |
+
+不再有 ``POST /users`` —— 注册统一走 ``/auth/register``。
 """
 
 from __future__ import annotations
@@ -16,16 +19,23 @@ from uuid import UUID
 
 from fastapi import APIRouter
 
-from app.common.dependencies import LimitQuery, OffsetQuery, UserServiceDep
-from app.common.openapi import READ_ERROR_RESPONSES
+from app.common.dependencies import CurrentUserDep, LimitQuery, OffsetQuery, UserServiceDep
+from app.common.openapi import AUTH_ERROR_RESPONSES
 from app.schemas.user import PaginatedUsers, UserRead, UserUpdate
 
 router = APIRouter(prefix="/users", tags=["users"])
 
 
-@router.get("", response_model=PaginatedUsers, summary="用户列表")
+@router.get(
+    "",
+    response_model=PaginatedUsers,
+    summary="用户列表",
+    description="任何已登录用户可见 —— 添加项目成员前需要先查到对方的 id。",
+    responses=AUTH_ERROR_RESPONSES,
+)
 async def list_users(
     service: UserServiceDep,
+    current_user: CurrentUserDep,
     limit: LimitQuery = 50,
     offset: OffsetQuery = 0,
 ) -> PaginatedUsers:
@@ -37,9 +47,9 @@ async def list_users(
     "/{user_id}",
     response_model=UserRead,
     summary="用户详情",
-    responses=READ_ERROR_RESPONSES,
+    responses=AUTH_ERROR_RESPONSES,
 )
-async def get_user(user_id: UUID, service: UserServiceDep) -> UserRead:
+async def get_user(user_id: UUID, service: UserServiceDep, current_user: CurrentUserDep) -> UserRead:
     user = await service.get_user(user_id)
     return UserRead.model_validate(user)
 
@@ -47,9 +57,15 @@ async def get_user(user_id: UUID, service: UserServiceDep) -> UserRead:
 @router.patch(
     "/{user_id}",
     response_model=UserRead,
-    summary="修改用户",
-    responses=READ_ERROR_RESPONSES,
+    summary="修改自己的资料",
+    description="只能改自己的，且只能改 display_name —— 账号状态不属于自助修改范围。",
+    responses=AUTH_ERROR_RESPONSES,
 )
-async def update_user(user_id: UUID, payload: UserUpdate, service: UserServiceDep) -> UserRead:
-    user = await service.update_user(user_id, payload)
+async def update_user(
+    user_id: UUID,
+    payload: UserUpdate,
+    service: UserServiceDep,
+    current_user: CurrentUserDep,
+) -> UserRead:
+    user = await service.update_user(user_id, payload, actor=current_user)
     return UserRead.model_validate(user)

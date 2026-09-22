@@ -131,7 +131,15 @@ app/
 | GET | `/requirements/{id}` | 该需求所属项目的成员 | |
 | PATCH | `/requirements/{id}` | **OWNER / DEVELOPER** | 内容变更会使 version 自增 |
 
-`POST /users` 与 `GET/PATCH /users/*` 仍在收尾（见文末「尚未收掉的短板」）。
+### 用户（Stage 2，已接鉴权）
+
+| Method | Path | 要求 | 说明 |
+|---|---|---|---|
+| GET | `/users` | 登录 | 任何登录用户可见 —— 添加项目成员前要能查到对方 id |
+| GET | `/users/{id}` | 登录 | 同上 |
+| PATCH | `/users/{id}` | **仅本人** | 只能改 `display_name`；账号状态不属于自助修改范围 |
+
+不再有 `POST /users` —— 注册统一走 `/auth/register`。
 注册统一走 `/auth/register` —— 同一个业务动作保留两条入口，两边的校验规则迟早会走偏。
 
 ### 权限模型
@@ -241,7 +249,7 @@ Authorization: Bearer <access_token>
 | 阶段 | 目标 | 状态 |
 |---|---|---|
 | Stage 1 | 基础 API + 用户/项目/需求 CRUD + 统一错误 + pytest | ✅ 已完成 |
-| Stage 2 | JWT 认证、密码哈希接入、Owner/Developer 角色、资源级权限、幂等键 | 🔄 进行中（认证、会话撤销、资源级权限已完成；用户模块收紧、幂等键待做） |
+| Stage 2 | JWT 认证、密码哈希接入、Owner/Developer 角色、资源级权限、幂等键 | 🔄 进行中（认证 / 会话撤销 / 资源级权限 / 用户模块鉴权已完成；**工作流幂等键待做**，需先建 `workflow_runs` 表） |
 | Stage 3 | LLM Provider 抽象、Product / Architect Agent、结构化输出校验、Agent Run 记录 | 待开始 |
 | Stage 4 | 工作流状态机、Developer / Tester / Reviewer、Tool Gateway、审批、交付物汇总 | 待开始 |
 | Stage 5 | Redis 限流、SSE、真实测试执行、Alembic、MySQL 兼容、简易 Web UI（可选增强） | 不阻塞交付 |
@@ -271,11 +279,12 @@ Authorization: Bearer <access_token>
 
 ---
 
-## 尚未收掉的短板
+## 已知取舍（不是遗漏，是选择）
 
-- **`/users` 三个接口还没有鉴权**：`GET /users`、`GET /users/{id}`、`PATCH /users/{id}`
-  目前不要求登录，且 `PATCH` 能改 `status` —— 等于任何人都能停用任何账号。
-  这是 Stage 2 的最后一个提交（`GET` 需登录、`PATCH` 收紧为仅本人且只允许改 `display_name`）。
-- 账号停用（`UserStatus.DISABLED`）目前**没有 API 入口**：设计文档只定义了项目级角色，
-  没有全局管理员，所以不凭空造一个。`ACCOUNT_DISABLED` 分支保留在认证层
-  （手工改库或将来有管理功能时立刻生效），测试通过直连改库来构造该状态。
+- **任何登录用户都能看到全部用户的邮箱**（`GET /users`）。这是为了让「添加项目成员」
+  这条流程可用 —— 你得先能查到那个人的 id。在本地协作平台里可接受；若要对外，
+  应收紧成「只能看到与你有共同项目的人」，或对其他人的 `email` 做脱敏。
+- **账号停用（`UserStatus.DISABLED`）没有 API 入口**。设计文档只定义了项目级角色
+  （Owner / Developer），没有全局管理员，所以不凭空造一个。`ACCOUNT_DISABLED` 分支
+  保留在认证层（手工改库或将来有管理功能时立刻生效），测试通过直连改库构造该状态。
+- **越权返回 403 而非 404**。理由见上文「权限模型」。

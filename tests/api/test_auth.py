@@ -126,13 +126,35 @@ async def test_wrong_password_and_unknown_email_are_indistinguishable(
     assert wrong_password.json()["error"]["code"] == "INVALID_CREDENTIALS"
 
 
-async def test_login_on_disabled_account_returns_401(client: AsyncClient, make_user: object) -> None:
+async def test_login_on_disabled_account_returns_401(
+    client: AsyncClient, make_user: object, set_user_status: object
+) -> None:
+    """停用账号没法通过接口做到（见 test_users.py 的说明），所以直接改库构造。"""
     user = await make_user()
-    await client.patch(f"{API}/users/{user['id']}", json={"status": "DISABLED"})
+    await set_user_status(user["id"], "DISABLED")
 
     response = await client.post(
         f"{API}/auth/login", json={"email": user["email"], "password": DEFAULT_PASSWORD}
     )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "ACCOUNT_DISABLED"
+
+
+async def test_disabling_an_account_kills_its_existing_tokens(
+    client: AsyncClient, make_actor: object, set_user_status: object
+) -> None:
+    """停用账号比「撤销令牌」更狠：连还在有效期内的令牌都立刻不管用。
+
+    这条分支只有在 ``authenticate_token`` 里检查 status 才成立 —— 如果只在登录时
+    检查，已经登录的会话会一直有效到令牌自然过期。
+    """
+    actor = await make_actor()
+    assert (await client.get(f"{API}/auth/me", headers=actor["headers"])).status_code == 200
+
+    await set_user_status(actor["user"]["id"], "DISABLED")
+
+    response = await client.get(f"{API}/auth/me", headers=actor["headers"])
 
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "ACCOUNT_DISABLED"
