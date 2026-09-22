@@ -343,11 +343,73 @@ Provider 抽象层最容易出的问题就是请求构造错了，而这类问�
 
 ---
 
+## Agent Runtime（Stage 3）
+
+```
+app/agent/
+└── runtime.py   统一的「调模型 → 校验 → 落库」流程
+```
+
+**这个文件是设计文档 §14.3 那条硬线的落点**：
+
+> AI 负责理解、生成和分析；后端负责权限、状态、数据和工具边界。
+> 模型输出必须先通过 Pydantic 校验，不允许直接把模型输出写入数据库。
+
+流程：`Prompt 组装 → provider.complete(json_mode=True) → JSON 解析 → Pydantic 校验 → 落库`
+
+校验通过才写 `parsed_json`。**未通过校验的输出只留在 `output_json`（原文）+
+`error_message`（为什么不合格）里**，没有任何「先写进去再校验」的变体。
+
+### 内容层重试必须带上失败原因
+
+重试不是把同一个 Prompt 再发一遍 —— 那样只是赌模型这次心情好。第二次会把
+**上一次的原始输出**和**校验报错**一起发回去，让模型知道要改什么：
+
+```
+[system] 你是需求分析师…
+[user]   需求原文：…
+[assistant] {"priority": "P0"}                 ← 上一次的坏输出
+[user]   你上一次的输出没有通过校验：输出不符合 _Plan：[{...}]
+         请修正后重新输出。只输出一个符合 _Plan 结构的 JSON 对象。
+```
+
+这也是内容层重试**必须**和传输层重试分开的原因（见上文「两类重试必须分清」）。
+
+### agent_runs 的粒度（文档没定义，这是本项目的选择）
+
+**一行 = 一次 provider 调用**，不是「一次逻辑上的 Agent 执行」。
+
+理由：内容层重试的价值恰恰在于「第一次模型回了坏 JSON、第二次改好了」，而这个信息
+只有按次记录才能看到。一次执行只落一行的话，就只能看到最终结果，无法回答
+「它是一次就成功，还是重试了三次才勉强成功」。
+
+同一逻辑执行的多行共享 `execution_id`，`attempt` 从 1 递增。
+
+| 字段 | 含义 |
+|---|---|
+| `execution_id` + `attempt` | 同一次执行的多次尝试可分组、可排序 |
+| `output_json` | 模型**原始输出**，不加工。排障必须能看到原文 |
+| `parsed_json` | **通过校验后**的结构化结果；`NULL` 表示没通过 |
+| `status` | `SUCCEEDED` / `INVALID_OUTPUT` / `FAILED` |
+| `model` | 记录**响应里**的 model。Provider 会把短名解析成具体 build（实测：请求 `deepseek-v4-flash`，返回 `deepseek-v4-flash-ga-260731`） |
+| `latency_ms` / `*_tokens` | 成本与性能排查 |
+
+`INVALID_OUTPUT` 与 `FAILED` 刻意分开：前者是**内容层**问题（模型不听话，值得重试或改
+Prompt），后者是**传输层**问题（网络、限流、凭据）。混成一个状态，就没法回答
+「这个 Agent 最近失败是因为模型不听话还是基础设施不稳」—— 两者处置方式完全不同。
+
+### 传输层失败不在 Runtime 里再重试
+
+Provider 抛出的网络/超时/限流错误已由 `RetryingLLMProvider` 处理过一轮。到这里还抛出来，
+说明重试也没救，直接记为 `FAILED` 并向上抛 —— 再套一层会让退避时间成倍叠加。
+
+---
+
 ## 数据库
 
-首期核心表（已建）：`users`、`projects`、`project_members`、`requirements`、`workflow_runs`
+首期核心表（已建）：`users`、`projects`、`project_members`、`requirements`、`workflow_runs`、`agent_runs`、`artifacts`
 
-按实现进度再增加：`agent_runs`、`artifacts`、`approvals`（Stage 3/4），
+按实现进度再增加：`approvals`（Stage 4），
 以及 `tool_calls`、`code_changes`、`test_runs`、`review_findings`、`audit_logs`。
 
 几条容易踩的约定：
@@ -383,7 +445,7 @@ Provider 抽象层最容易出的问题就是请求构造错了，而这类问�
 |---|---|---|
 | Stage 1 | 基础 API + 用户/项目/需求 CRUD + 统一错误 + pytest | ✅ 已完成 |
 | Stage 2 | JWT 认证、密码哈希接入、Owner/Developer 角色、资源级权限、幂等键 | ✅ 已完成 |
-| Stage 3 | LLM Provider 抽象、Product / Architect Agent、结构化输出校验、Agent Run 记录 | 🔄 进行中（Provider 抽象 + Mock 已完成；Agent 与结构化输出校验待做） |
+| Stage 3 | LLM Provider 抽象、Product / Architect Agent、结构化输出校验、Agent Run 记录 | 🔄 进行中（Provider 抽象 + Agent Runtime + agent_runs/artifacts 已完成；Product/Architect Agent 与接口待做） |
 | Stage 4 | 工作流状态机、Developer / Tester / Reviewer、Tool Gateway、审批、交付物汇总 | 待开始 |
 | Stage 5 | Redis 限流、SSE、真实测试执行、Alembic、MySQL 兼容、简易 Web UI（可选增强） | 不阻塞交付 |
 

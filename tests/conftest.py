@@ -24,12 +24,12 @@ from uuid import UUID, uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
 
 from app.config.settings import Settings
 from app.infrastructure.db.base import Base
-from app.infrastructure.db.session import configure_database, get_session_factory
+from app.infrastructure.db.session import configure_database, create_engine, get_session_factory
 from app.main import create_app
 from app.models.requirement import Requirement
 from app.models.user import User
@@ -56,7 +56,16 @@ def test_settings(tmp_path: Path) -> Settings:
 
 @pytest.fixture
 async def engine(test_settings: Settings) -> AsyncIterator[Any]:
-    engine = create_async_engine(test_settings.database_url, poolclass=NullPool)
+    """走应用自己的 ``create_engine`` 建引擎。
+
+    不直接调 ``create_async_engine``：那样会绕过连接级设置（例如 SQLite 的
+    ``PRAGMA foreign_keys=ON``），于是「测试通过」和「生产行为」是两回事 ——
+    外键在测试里不生效，级联删除也就永远测不出来。
+
+    ``NullPool`` 是必须的：pytest-asyncio 每个用例跑在新事件循环里，
+    池化连接跨循环复用会失效。
+    """
+    engine = create_engine(test_settings, poolclass=NullPool)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield engine
@@ -76,8 +85,15 @@ async def client(app: Any) -> AsyncIterator[AsyncClient]:
 
 
 @pytest.fixture
-async def db_session(engine: Any) -> AsyncIterator[AsyncSession]:
-    """直连数据库，用来验证「数据真的落库了」而不是只被响应体糊过去。"""
+async def db_session(app: Any) -> AsyncIterator[AsyncSession]:
+    """直连数据库，用来验证「数据真的落库了」而不是只被响应体糊过去。
+
+    依赖 ``app`` 是**必须显式声明**的，不是笔误：``configure_database()`` 在
+    ``app`` 夹具里调用，少了它 ``get_session_factory()`` 会直接抛
+    「Session factory is not configured」。之前这里只依赖 ``engine``，所有用到
+    ``db_session`` 的用例恰好同时也请求了 ``client``（间接依赖 ``app``）才没出事 ——
+    靠巧合成立的顺序依赖，迟早会在新用例上炸。
+    """
     factory: async_sessionmaker[AsyncSession] = get_session_factory()
     async with factory() as session:
         yield session

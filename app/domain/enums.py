@@ -24,6 +24,9 @@ __all__ = [
     "RequirementStatus",
     "WorkflowStatus",
     "WorkflowStep",
+    "AgentRole",
+    "AgentRunStatus",
+    "ArtifactType",
 ]
 
 
@@ -141,3 +144,45 @@ class WorkflowStep(StrEnum):
     APPROVAL = "APPROVAL"
 
     DONE = "DONE"
+
+
+class AgentRole(StrEnum):
+    """文档 §4 的五个 Agent 角色。
+
+    取值同时是 ``agent_runs.agent_role`` 的取值集合。不用数字 id：
+    日志和数据库里出现 ``PRODUCT`` 比 ``1`` 好排查一百倍。
+    """
+
+    PRODUCT = "PRODUCT"
+    ARCHITECT = "ARCHITECT"
+    DEVELOPER = "DEVELOPER"
+    TESTER = "TESTER"
+    REVIEWER = "REVIEWER"
+
+
+class AgentRunStatus(StrEnum):
+    """一次 Agent 调用的结果。
+
+    ``INVALID_OUTPUT`` 与 ``FAILED`` 刻意分开：
+
+    - ``INVALID_OUTPUT``：模型正常返回了，但内容不是合法 JSON / 不合 Schema。
+      这是**内容层**问题，值得重试或改写 Prompt。
+    - ``FAILED``：调用本身失败（网络、限流、凭据）。这是**传输层**问题。
+
+    两者混成一个 ``FAILED``，就没法回答「这个 Agent 最近失败是因为模型不听话
+    还是因为基础设施不稳」—— 而这两种情况的处置方式完全不同。
+    """
+
+    SUCCEEDED = "SUCCEEDED"
+    INVALID_OUTPUT = "INVALID_OUTPUT"
+    FAILED = "FAILED"
+
+
+class ArtifactType(StrEnum):
+    """文档 §6.5 定义的交付物类型。"""
+
+    PRD = "PRD"
+    ARCHITECTURE = "ARCHITECTURE"
+    PATCH = "PATCH"
+    TEST_REPORT = "TEST_REPORT"
+    REVIEW = "REVIEW"

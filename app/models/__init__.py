@@ -9,9 +9,18 @@ metadata 里就没有它的定义，建表会静默漏掉。所以新增模型�
 对象图导航时再补关系并配 ``lazy`` 策略。
 """
 
+from app.models.agent import AgentRun, Artifact
 from app.models.project import Project, ProjectMember
 from app.models.requirement import Requirement
 from app.models.user import User
 from app.models.workflow import WorkflowRun
 
-__all__ = ["Project", "ProjectMember", "Requirement", "User", "WorkflowRun"]
+__all__ = [
+    "AgentRun",
+    "Artifact",
+    "Project",
+    "ProjectMember",
+    "Requirement",
+    "User",
+    "WorkflowRun",
+]
