@@ -71,7 +71,7 @@ async def test_duplicate_email_does_not_write_a_partial_row(
     before = (await db_session.execute(select(func.count()).select_from(User))).scalar_one()
 
     response = await client.post(
-        f"{API}/users",
+        f"{API}/auth/register",
         json={"email": "only-once@example.com", "password": "StrongPass123!", "display_name": "Dup"},
     )
 

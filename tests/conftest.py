@@ -86,10 +86,15 @@ async def db_session(engine: Any) -> AsyncIterator[AsyncSession]:
 MakeUser = Callable[..., Awaitable[dict[str, Any]]]
 MakeProject = Callable[..., Awaitable[dict[str, Any]]]
 MakeRequirement = Callable[..., Awaitable[dict[str, Any]]]
+MakeActor = Callable[..., Awaitable[dict[str, Any]]]
+Login = Callable[..., Awaitable[dict[str, Any]]]
+AuthHeaders = Callable[..., Awaitable[dict[str, str]]]
 
 
 @pytest.fixture
 def make_user(client: AsyncClient) -> MakeUser:
+    """走真实的注册接口，而不是直接写库 —— 否则注册链路的校验规则不会被覆盖。"""
+
     async def _make(**overrides: Any) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "email": f"user-{uuid4().hex[:8]}@example.com",
@@ -97,9 +102,51 @@ def make_user(client: AsyncClient) -> MakeUser:
             "display_name": "Test User",
         }
         payload.update(overrides)
-        response = await client.post(f"{API}/users", json=payload)
+        response = await client.post(f"{API}/auth/register", json=payload)
         assert response.status_code == 201, response.text
         return response.json()
+
+    return _make
+
+
+@pytest.fixture
+def login(client: AsyncClient) -> Login:
+    """邮箱 + 密码换访问令牌。"""
+
+    async def _login(email: str, password: str = DEFAULT_PASSWORD) -> dict[str, Any]:
+        response = await client.post(f"{API}/auth/login", json={"email": email, "password": password})
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    return _login
+
+
+@pytest.fixture
+def auth_headers(login: Login) -> AuthHeaders:
+    """``auth_headers(email)`` → ``{"Authorization": "Bearer ..."}``，直接展开进请求。"""
+
+    async def _headers(email: str, password: str = DEFAULT_PASSWORD) -> dict[str, str]:
+        token = (await login(email, password))["access_token"]
+        return {"Authorization": f"Bearer {token}"}
+
+    return _headers
+
+
+@pytest.fixture
+def make_actor(client: AsyncClient, auth_headers: AuthHeaders) -> MakeActor:
+    """一次造出「用户 + 他的请求头」，省掉每个用例都写两行。"""
+
+    async def _make(**overrides: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "email": f"user-{uuid4().hex[:8]}@example.com",
+            "password": DEFAULT_PASSWORD,
+            "display_name": "Test User",
+        }
+        payload.update(overrides)
+        response = await client.post(f"{API}/auth/register", json=payload)
+        assert response.status_code == 201, response.text
+        user = response.json()
+        return {"user": user, "headers": await auth_headers(user["email"], payload["password"])}
 
     return _make
 

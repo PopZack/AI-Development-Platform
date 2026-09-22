@@ -2,34 +2,25 @@
 
 Layer: Presentation（Router）—— 只做三件事：收请求、交 Service、包响应。
 
-文档 §7.1 的 ``/auth/register`` 在 Stage 2 落地。Stage 1 先暴露 ``/users``
-以满足 §11「用户、项目、需求 CRUD」的验收要求；Stage 2 引入 JWT 后，
-这个路由会收缩为内部管理用途（或直接下线，改由 /auth/register 承接）。
+注册入口已由 ``POST /auth/register`` 承接，所以这里的 ``POST /users``
+在 Stage 2 下线了：**同一个业务动作保留两条入口，两边的校验规则迟早会走偏**
+（比如一边统一小写邮箱、另一边忘了）。留下的是查询与修改。
+
+本模块的接口目前尚未强制认证 —— 给业务路由加认证与资源级权限是 Stage 2 的
+下一个提交。在那之前不要部署到任何共享环境。
 """
 
 from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter
 
 from app.common.dependencies import LimitQuery, OffsetQuery, UserServiceDep
-from app.common.openapi import CREATE_ERROR_RESPONSES, READ_ERROR_RESPONSES
-from app.schemas.user import PaginatedUsers, UserCreate, UserRead, UserUpdate
+from app.common.openapi import READ_ERROR_RESPONSES
+from app.schemas.user import PaginatedUsers, UserRead, UserUpdate
 
 router = APIRouter(prefix="/users", tags=["users"])
-
-
-@router.post(
-    "",
-    response_model=UserRead,
-    status_code=status.HTTP_201_CREATED,
-    summary="创建用户",
-    responses=CREATE_ERROR_RESPONSES,
-)
-async def create_user(payload: UserCreate, service: UserServiceDep) -> UserRead:
-    user = await service.create_user(payload)
-    return UserRead.model_validate(user)
 
 
 @router.get("", response_model=PaginatedUsers, summary="用户列表")

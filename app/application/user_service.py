@@ -1,10 +1,10 @@
-"""用户用例。
+"""用户用例：查询与修改。
 
 Layer: Application（Service）—— 编排一次业务用例，并**持有事务边界**。
 
-文档 §5.2 对 Service 的约束：不直接承载所有底层技术细节。
-所以这里只做「查重 → 组装实体 → 交给仓储 → 提交」，SQL 全在 Repository，
-密码技术细节全在 infrastructure/auth。
+注册不在这个类里 —— 它属于认证流程，在 ``app/application/auth_service.py``。
+Stage 1 这里曾有一份 ``create_user``，Stage 2 已删除：同一个「创建用户」动作
+保留两条实现，两边的邮箱归一化、查重规则迟早会走偏。
 """
 
 from __future__ import annotations
@@ -14,12 +14,10 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.common.exceptions import ConflictError, NotFoundError
-from app.domain.enums import UserStatus
-from app.infrastructure.auth.password import hash_password
+from app.common.exceptions import NotFoundError
 from app.models.user import User
 from app.repositories.user_repository import UserRepository
-from app.schemas.user import UserCreate, UserUpdate
+from app.schemas.user import UserUpdate
 
 __all__ = ["UserService"]
 
@@ -30,27 +28,6 @@ class UserService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
         self._users = UserRepository(session)
-
-    async def create_user(self, payload: UserCreate) -> User:
-        # 邮箱统一小写后落库，否则唯一索引挡不住 "A@x.com" 和 "a@x.com" 这种重复
-        email = payload.email.strip().lower()
-        if await self._users.email_exists(email):
-            raise ConflictError(
-                "Email already registered",
-                code="EMAIL_ALREADY_REGISTERED",
-                details={"email": email},
-            )
-
-        user = User(
-            email=email,
-            password_hash=hash_password(payload.password),
-            display_name=payload.display_name.strip(),
-            status=UserStatus.ACTIVE.value,
-        )
-        await self._users.add(user)
-        await self._session.commit()
-        logger.info("user created | id=%s email=%s", user.id, user.email)
-        return user
 
     async def get_user(self, user_id: UUID) -> User:
         user = await self._users.get(user_id)

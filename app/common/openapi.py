@@ -10,7 +10,12 @@ from typing import Any
 
 from app.schemas.common import ErrorResponse
 
-__all__ = ["COMMON_ERROR_RESPONSES", "READ_ERROR_RESPONSES", "CREATE_ERROR_RESPONSES"]
+__all__ = [
+    "COMMON_ERROR_RESPONSES",
+    "READ_ERROR_RESPONSES",
+    "CREATE_ERROR_RESPONSES",
+    "AUTH_ERROR_RESPONSES",
+]
 
 COMMON_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     404: {"model": ErrorResponse, "description": "资源不存在（code 形如 PROJECT_NOT_FOUND）"},
@@ -25,6 +30,14 @@ READ_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
 }
 
 CREATE_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
+    404: COMMON_ERROR_RESPONSES[404],
+    409: COMMON_ERROR_RESPONSES[409],
+    422: COMMON_ERROR_RESPONSES[422],
+}
+
+# 需要登录的接口：401 由 get_current_user 依赖产生
+AUTH_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
+    401: {"model": ErrorResponse, "description": "未认证：令牌缺失、过期、被篡改或已被撤销"},
     404: COMMON_ERROR_RESPONSES[404],
     409: COMMON_ERROR_RESPONSES[409],
     422: COMMON_ERROR_RESPONSES[422],
