@@ -463,6 +463,31 @@ app/infrastructure/tools/
 对应地 `tool_calls.status` 里 `APPROVAL_REQUIRED` 与 `DENIED` 是两个独立取值，
 审批流程要能从审计里筛出来，靠的就是这一条。
 
+### 人工审批（L4 的「人点头」）
+
+L4 工具被 Gateway 拦下时，**审批记录是自动创建的**（`PENDING`），
+`approval_id` 会随 `409 APPROVAL_REQUIRED` 的响应返回给调用方。
+没有「手动发起审批」的接口 —— 系统知道有个工具被拦了，人不需要替系统记这件事。
+
+| Method | Path | 权限 | 说明 |
+|---|---|---|---|
+| GET | `/requirements/{id}/approvals` | 项目成员 | 列表，可按 `status` 过滤 |
+| GET | `/approvals/{id}` | 项目成员 | 详情 |
+| POST | `/approvals/{id}/approve` | **仅 OWNER** | 批准 |
+| POST | `/approvals/{id}/reject` | **仅 OWNER** | 驳回 |
+
+规则：
+
+- **只有项目 OWNER 能批。** Developer 可以触发 Agent（也就可能触发 L4 工具），
+  但不能批自己的请求 —— 「我自己申请、我自己批准」等于没有审批。
+  这是刻意的职责分离。
+- **三个终态都不再有出边。** 批了又反悔要重新发起一次，历史必须原样保留。
+- **过期是惰性判定，不是后台任务。** 读取或审批时发现 `PENDING` 已到期，
+  先落成 `EXPIRED` 再拒绝。默认有效期 24 小时。
+- **L4 工具必须挂在需求上下文里调用。** 脱离需求的「批准」没有意义 ——
+  批的是「改这份需求的工作区」，不是「随便改点什么」。
+  越界调用返回 `403 APPROVAL_CONTEXT_REQUIRED`。
+
 ### 路径校验：为什么不能用字符串前缀
 
 文档 §14.1 原文：*「路径校验必须解析为规范化路径后判断是否在授权工作区根内，
