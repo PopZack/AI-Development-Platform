@@ -441,7 +441,11 @@ class WorkflowOrchestrator:
         architecture = await self._artifacts.latest(run.requirement_id, ArtifactType.ARCHITECTURE)
         patch_artifact = await self._artifacts.latest(run.requirement_id, ArtifactType.PATCH)
         patch = dict(patch_artifact.content_json) if patch_artifact else {}
-        written = [c.get("path", "") for c in patch.get("changes", [])]
+        # Tester 要判的是代码，所以给**内容**而不是路径 —— 只给文件名会让它
+        # 判出「无法验证」的假阴性（第一轮真实模型验证实际发生过）
+        written = [
+            {"path": c.get("path", ""), "content": c.get("new_content", "")} for c in patch.get("changes", [])
+        ]
 
         outcome = await self._run_agent_step(
             lambda: self._runtime.run(

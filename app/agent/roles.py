@@ -227,8 +227,23 @@ def build_developer_user_prompt(*, prd: dict, architecture: dict, workspace_file
     )
 
 
-def build_tester_user_prompt(*, prd: dict, architecture: dict, written_files: list[str]) -> str:
-    written = "\n".join(f"- {f}" for f in written_files) or "（无）"
+def build_tester_user_prompt(*, prd: dict, architecture: dict, written_files: list[dict[str, str]]) -> str:
+    """Tester 的输入里必须有**文件内容**而不只是路径。
+
+    第一轮真实模型验证暴露过这个问题：只给文件名清单时，Tester 的结论是
+    「未提供文件实际内容，无法判定」—— 一个上下文缺失造成的假阴性 fail。
+    Tester 判的是代码，就必须看到代码；单文件截断上限防 Prompt 失控。
+    """
+    max_chars = 8000
+    blocks: list[str] = []
+    for item in written_files:
+        content = item.get("content", "")
+        truncated = ""
+        if len(content) > max_chars:
+            content = content[:max_chars]
+            truncated = f"\n…（超出 {max_chars} 字符，已截断）"
+        blocks.append(f"文件 {item.get('path', '?')}：\n```\n{content}{truncated}\n```")
+    written = "\n\n".join(blocks) or "（无）"
     return "\n".join(
         [
             "已确认的 PRD（JSON）：",
@@ -237,7 +252,7 @@ def build_tester_user_prompt(*, prd: dict, architecture: dict, written_files: li
             "架构设计（JSON）：",
             json.dumps(architecture, ensure_ascii=False, indent=2),
             "",
-            "本次实际写入工作区的文件：",
+            "本次实际写入工作区的文件内容（这是写入时的最终内容，不是 diff）：",
             written,
             "",
             "请逐条核对验收标准并给出测试报告。",
