@@ -252,7 +252,9 @@ async def test_unknown_tool_is_denied_and_recorded(db_session: AsyncSession, wor
     assert call.level == "UNKNOWN"
 
 
-async def test_l4_tool_is_recorded_as_approval_required(db_session: AsyncSession, workspace: Path) -> None:
+async def test_l4_tool_is_recorded_as_approval_required(
+    db_session: AsyncSession, workspace: Path, requirement_id: UUID
+) -> None:
     """L4 要审批，且审计里能和「直接被拒」区分开 —— 审批流程要靠这条筛。"""
 
     async def _apply_patch(request) -> dict:  # pragma: no cover - 不会真的执行
@@ -268,12 +270,52 @@ async def test_l4_tool_is_recorded_as_approval_required(db_session: AsyncSession
         )
     )
 
-    with pytest.raises(ApprovalRequiredError):
-        await gateway.execute("apply_patch", {"patch": "..."})
+    with pytest.raises(ApprovalRequiredError) as excinfo:
+        await gateway.execute(
+            "apply_patch", {"patch": "..."}, context=ToolContext(requirement_id=requirement_id)
+        )
+
+    assert excinfo.value.details["approval_id"]
 
     call = (await db_session.execute(select(ToolCall))).scalar_one()
     assert call.status == ToolCallStatus.APPROVAL_REQUIRED.value
     assert call.level == "L4"
+
+    # 审批记录是 Gateway 自动创建的
+    from app.models.approval import Approval
+
+    approval = (await db_session.execute(select(Approval))).scalar_one()
+    assert approval.status == "PENDING"
+    assert approval.tool_name == "apply_patch"
+    assert approval.requirement_id == requirement_id
+
+
+async def test_l4_tool_without_requirement_context_is_rejected(
+    db_session: AsyncSession, workspace: Path
+) -> None:
+    """L4 工具必须挂在某个需求上 —— 脱离需求的「批准」没有意义。
+
+    审批批的是「改这份需求的工作区」，不是「随便改点什么」。
+    与其让审批变成一条没有归属的空记录，不如明确拒绝。
+    """
+
+    async def _apply_patch(request) -> dict:  # pragma: no cover - 不会真的执行
+        return {}
+
+    gateway = _gateway(db_session, workspace)
+    gateway.register(
+        ToolDefinition(name="apply_patch", level=ToolLevel.L4, description="写补丁", handler=_apply_patch)
+    )
+
+    with pytest.raises(ToolDeniedError) as excinfo:
+        await gateway.execute("apply_patch", {"patch": "..."})
+
+    assert excinfo.value.code == "APPROVAL_CONTEXT_REQUIRED"
+
+    from app.models.approval import Approval
+
+    total = (await db_session.execute(select(func.count()).select_from(Approval))).scalar_one()
+    assert total == 0, "没有归属的审批记录不该被创建"
 
 
 async def test_l5_tool_is_denied_and_recorded(db_session: AsyncSession, workspace: Path) -> None:

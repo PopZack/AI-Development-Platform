@@ -23,18 +23,21 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.common.exceptions import AppError, NotFoundError
+from app.common.exceptions import AppError, ApprovalRequiredError, NotFoundError, ToolDeniedError
 from app.domain.enums import ToolCallStatus
-from app.domain.tool_levels import ToolAccessDecision, ToolLevel, ensure_tool_allowed
+from app.domain.tool_levels import ToolAccessDecision, ToolLevel, decision_for
 from app.infrastructure.tools.paths import WorkspacePathValidator
 from app.infrastructure.tools.read_tools import READ_TOOLS, ToolDefinition, ToolRequest
+from app.models.approval import Approval
 from app.models.tool import ToolCall
+from app.repositories.approval_repository import ApprovalRepository
 from app.repositories.tool_repository import ToolCallRepository
 
 __all__ = ["ToolContext", "ToolGateway"]
@@ -54,10 +57,19 @@ class ToolContext:
 
 
 class ToolGateway:
-    def __init__(self, session: AsyncSession, *, workspace_root: str | Path = "./workspace") -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        workspace_root: str | Path = "./workspace",
+        requested_by: UUID | None = None,
+    ) -> None:
         self._session = session
         self._calls = ToolCallRepository(session)
+        self._approvals = ApprovalRepository(session)
         self._workspace = WorkspacePathValidator(workspace_root)
+        # 触发工具的用户：L4 工具被拦下时，审批记录要能追溯到「是谁要做的」
+        self._requested_by = requested_by
         self._tools: dict[str, ToolDefinition] = {t.name: t for t in READ_TOOLS}
 
     # ------------------------------------------------------------------ 注册
@@ -116,26 +128,66 @@ class ToolGateway:
             )
             raise NotFoundError(f"Unknown tool: {tool_name}", code="TOOL_UNKNOWN")
 
-        try:
-            ensure_tool_allowed(definition.level)
-        except AppError as exc:
-            # L4 要审批 / L5 被禁 —— 两种都要留下痕迹
-            status = (
-                ToolCallStatus.APPROVAL_REQUIRED
-                if decision_hint(exc) is ToolAccessDecision.APPROVAL_REQUIRED
-                else ToolCallStatus.DENIED
-            )
+        # ── 权限判断 ──────────────────────────────────────────────
+        # L4 走「发起审批」：Gateway 自动建一条 PENDING 的 approvals 记录，
+        # 并把 approval_id 带回给调用方。没有这一步，「需要人点头」就只剩一个报错，
+        # 审批人不知道该批什么。
+        if decision_for(definition.level) is ToolAccessDecision.APPROVAL_REQUIRED:
+            if ctx.requirement_id is None:
+                # 审批必须挂在某个需求上（approvals.requirement_id 非空），
+                # 更重要的是：脱离需求的「批准」没有意义 —— 批的是
+                # 「改这份需求的工作区」，不是「随便改点什么」。
+                # 与其让审批变成一条没有归属的空记录，不如在这里明确拒绝。
+                await self._record(
+                    tool_name=tool_name,
+                    level=definition.level,
+                    status=ToolCallStatus.DENIED,
+                    params=params,
+                    ctx=ctx,
+                    error_code="APPROVAL_CONTEXT_REQUIRED",
+                    error_message="L4 tools must be executed within a requirement context",
+                    latency_ms=_ms(started),
+                )
+                raise ToolDeniedError(
+                    "L4 tools must be executed within a requirement context",
+                    code="APPROVAL_CONTEXT_REQUIRED",
+                    details={"tool_name": tool_name, "level": definition.level.name},
+                )
+            approval = await self._request_approval(definition, params, ctx)
             await self._record(
                 tool_name=tool_name,
                 level=definition.level,
-                status=status,
+                status=ToolCallStatus.APPROVAL_REQUIRED,
                 params=params,
                 ctx=ctx,
-                error_code=exc.code,
-                error_message=exc.message,
+                error_code="APPROVAL_REQUIRED",
+                error_message=f"Tool {tool_name} requires human approval",
                 latency_ms=_ms(started),
             )
-            raise
+            raise ApprovalRequiredError(
+                f"Tool {tool_name} requires human approval",
+                details={
+                    "approval_id": str(approval.id),
+                    "tool_name": tool_name,
+                    "level": definition.level.name,
+                },
+            )
+
+        if decision_for(definition.level) is ToolAccessDecision.DENIED:
+            await self._record(
+                tool_name=tool_name,
+                level=definition.level,
+                status=ToolCallStatus.DENIED,
+                params=params,
+                ctx=ctx,
+                error_code="TOOL_LEVEL_FORBIDDEN",
+                error_message=f"Tool level {definition.level.name} is not allowed in this deployment",
+                latency_ms=_ms(started),
+            )
+            raise ToolDeniedError(
+                f"Tool level {definition.level.name} is not allowed in this deployment",
+                details={"level": definition.level.name},
+            )
 
         try:
             data = await definition.handler(ToolRequest(params=params, workspace=self._workspace))
@@ -166,6 +218,45 @@ class ToolGateway:
             "tool executed | tool=%s level=%s latency=%sms", tool_name, definition.level.name, latency
         )
         return data
+
+    # ------------------------------------------------------------------ 审批
+
+    async def _request_approval(
+        self, definition: ToolDefinition, params: dict[str, Any], ctx: ToolContext
+    ) -> Approval:
+        """L4 工具被拦下时自动发起一条审批。
+
+        让 Gateway 而不是调用方来建这条记录，理由很直接：
+        **系统知道有个 L4 工具被拦了**，人不需要替系统记这件事。
+        如果要靠谁手动 POST /approvals，那这一步早晚会忘。
+
+        ``reason`` 刻意写清「是什么工具、要改什么」，审批人点开列表
+        第一眼就能判断该不该批。
+        """
+        from app.domain.approval import DEFAULT_APPROVAL_TTL_HOURS
+
+        expires_at = datetime.now(UTC) + timedelta(hours=DEFAULT_APPROVAL_TTL_HOURS)
+        approval = Approval(
+            requirement_id=ctx.requirement_id,
+            workflow_run_id=ctx.workflow_run_id,
+            tool_name=definition.name,
+            status="PENDING",
+            requested_by=self._requested_by,
+            reason=(
+                f"Agent 请求执行 L4 工具「{definition.name}」：{definition.description}。"
+                f"参数：{json.dumps(params, ensure_ascii=False, default=str)[:300]}"
+            ),
+            expires_at=expires_at,
+        )
+        await self._approvals.add(approval)
+        await self._session.commit()
+        logger.info(
+            "approval requested | tool=%s approval=%s requirement=%s",
+            definition.name,
+            approval.id,
+            ctx.requirement_id,
+        )
+        return approval
 
     # ------------------------------------------------------------------ 审计
 
@@ -198,13 +289,6 @@ class ToolGateway:
         await self._calls.add(call)
         # 审计记录独立提交：外层业务回滚时，这条记录必须留下来
         await self._session.commit()
-
-
-def decision_hint(exc: AppError) -> ToolAccessDecision:
-    """从异常 code 反推权限决策，避免 Gateway 自己重复一遍等级→决策的映射。"""
-    if exc.code == "APPROVAL_REQUIRED":
-        return ToolAccessDecision.APPROVAL_REQUIRED
-    return ToolAccessDecision.DENIED
 
 
 def _ms(started: float) -> int:

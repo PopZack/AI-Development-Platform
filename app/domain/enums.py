@@ -28,6 +28,7 @@ __all__ = [
     "AgentRunStatus",
     "ArtifactType",
     "ToolCallStatus",
+    "ApprovalStatus",
 ]
 
 
@@ -201,3 +202,17 @@ class ToolCallStatus(StrEnum):
     DENIED = "DENIED"
     APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
     FAILED = "FAILED"
+
+
+class ApprovalStatus(StrEnum):
+    """文档 §6.x 定义的人工审批状态集合。
+
+    三个终态（APPROVED / REJECTED / EXPIRED）都不再有出边 ——
+    审批是一次性决定，不允许「批了又反悔」；要改主意就重新发起一次，
+    历史必须原样保留。
+    """
+
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    EXPIRED = "EXPIRED"

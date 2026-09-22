@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.v1 import agents, auth, projects, requirements, users, workflows
+from app.api.v1 import agents, approvals, auth, projects, requirements, users, workflows
 
 __all__ = ["api_router"]
 
@@ -18,3 +18,4 @@ api_router.include_router(projects.router)
 api_router.include_router(requirements.router)
 api_router.include_router(workflows.router)
 api_router.include_router(agents.router)
+api_router.include_router(approvals.router)
