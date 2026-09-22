@@ -63,11 +63,20 @@ def ensure_transition(current: ApprovalStatus, target: ApprovalStatus) -> None:
 def effective_status(
     status: ApprovalStatus, expires_at: datetime | None, *, now: datetime | None = None
 ) -> ApprovalStatus:
-    """把「已过期但还没被标记」的 PENDING 判成 EXPIRED。
+    """把「已过期但还没被标记」的记录判成 ``EXPIRED``。
 
+    ``expires_at`` 的含义随状态变化：
+
+    - ``PENDING``：必须在何时前做出决定
+    - ``APPROVED``：批准后必须在何时前**被消费** —— 否则一个批准永远有效，
+      「人工审批」就退化成了一次性的放行券
+
+    ``REJECTED`` 不受影响（那是一次已经做出的决定，不该被时间改写）。
     ``expires_at`` 为 ``None`` 表示永不过期。
     """
-    if status is not ApprovalStatus.PENDING or expires_at is None:
+    if status in (ApprovalStatus.REJECTED, ApprovalStatus.EXPIRED):
+        return status
+    if expires_at is None:
         return status
     now = now or datetime.now(UTC)
     expiry = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=UTC)

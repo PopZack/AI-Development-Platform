@@ -30,6 +30,18 @@ class ToolCallRepository(BaseRepository[ToolCall]):
         stmt = stmt.order_by(ToolCall.created_at.asc()).limit(limit)
         return list((await self.session.execute(stmt)).scalars().all())
 
+    async def has_succeeded_with_approval(self, approval_id: UUID) -> bool:
+        """这条审批是否已经被一次成功的执行消费过。用于判重放。"""
+        stmt = (
+            select(func.count())
+            .select_from(ToolCall)
+            .where(
+                ToolCall.approval_id == approval_id,
+                ToolCall.status == ToolCallStatus.SUCCEEDED.value,
+            )
+        )
+        return int((await self.session.execute(stmt)).scalar_one()) > 0
+
     async def count_by_status(self, requirement_id: UUID, status: ToolCallStatus) -> int:
         stmt = (
             select(func.count())

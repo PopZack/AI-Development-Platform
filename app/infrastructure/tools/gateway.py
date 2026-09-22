@@ -31,8 +31,10 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.exceptions import AppError, ApprovalRequiredError, NotFoundError, ToolDeniedError
-from app.domain.enums import ToolCallStatus
+from app.domain.approval import effective_status
+from app.domain.enums import ApprovalStatus, ToolCallStatus
 from app.domain.tool_levels import ToolAccessDecision, ToolLevel, decision_for
+from app.infrastructure.tools.patch_tools import PATCH_TOOLS
 from app.infrastructure.tools.paths import WorkspacePathValidator
 from app.infrastructure.tools.read_tools import READ_TOOLS, ToolDefinition, ToolRequest
 from app.models.approval import Approval
@@ -70,7 +72,7 @@ class ToolGateway:
         self._workspace = WorkspacePathValidator(workspace_root)
         # 触发工具的用户：L4 工具被拦下时，审批记录要能追溯到「是谁要做的」
         self._requested_by = requested_by
-        self._tools: dict[str, ToolDefinition] = {t.name: t for t in READ_TOOLS}
+        self._tools: dict[str, ToolDefinition] = {t.name: t for t in (*READ_TOOLS, *PATCH_TOOLS)}
 
     # ------------------------------------------------------------------ 注册
 
@@ -129,9 +131,10 @@ class ToolGateway:
             raise NotFoundError(f"Unknown tool: {tool_name}", code="TOOL_UNKNOWN")
 
         # ── 权限判断 ──────────────────────────────────────────────
-        # L4 走「发起审批」：Gateway 自动建一条 PENDING 的 approvals 记录，
-        # 并把 approval_id 带回给调用方。没有这一步，「需要人点头」就只剩一个报错，
-        # 审批人不知道该批什么。
+        # L4 的协议是「两段式」：
+        #   第一次调用不带 approval_id → 自动发起审批，抛 APPROVAL_REQUIRED
+        #   OWNER 批准后再带上 approval_id 重试 → 校验通过，真正执行
+        # 这样「人点头」就不是一句空话：没有批准过的调用永远到不了 handler。
         if decision_for(definition.level) is ToolAccessDecision.APPROVAL_REQUIRED:
             if ctx.requirement_id is None:
                 # 审批必须挂在某个需求上（approvals.requirement_id 非空），
@@ -153,25 +156,32 @@ class ToolGateway:
                     code="APPROVAL_CONTEXT_REQUIRED",
                     details={"tool_name": tool_name, "level": definition.level.name},
                 )
-            approval = await self._request_approval(definition, params, ctx)
-            await self._record(
-                tool_name=tool_name,
-                level=definition.level,
-                status=ToolCallStatus.APPROVAL_REQUIRED,
-                params=params,
-                ctx=ctx,
-                error_code="APPROVAL_REQUIRED",
-                error_message=f"Tool {tool_name} requires human approval",
-                latency_ms=_ms(started),
-            )
-            raise ApprovalRequiredError(
-                f"Tool {tool_name} requires human approval",
-                details={
-                    "approval_id": str(approval.id),
-                    "tool_name": tool_name,
-                    "level": definition.level.name,
-                },
-            )
+
+            approval_id = self._extract_approval_id(params)
+            if approval_id is None:
+                # 第一次调用：发起审批
+                approval = await self._request_approval(definition, params, ctx)
+                await self._record(
+                    tool_name=tool_name,
+                    level=definition.level,
+                    status=ToolCallStatus.APPROVAL_REQUIRED,
+                    params=params,
+                    ctx=ctx,
+                    error_code="APPROVAL_REQUIRED",
+                    error_message=f"Tool {tool_name} requires human approval",
+                    latency_ms=_ms(started),
+                )
+                raise ApprovalRequiredError(
+                    f"Tool {tool_name} requires human approval",
+                    details={
+                        "approval_id": str(approval.id),
+                        "tool_name": tool_name,
+                        "level": definition.level.name,
+                    },
+                )
+
+            # 第二次调用：校验审批
+            approval = await self._ensure_approval_usable(approval_id, definition=definition, ctx=ctx)
 
         if decision_for(definition.level) is ToolAccessDecision.DENIED:
             await self._record(
@@ -198,6 +208,9 @@ class ToolGateway:
                 status=ToolCallStatus.FAILED,
                 params=params,
                 ctx=ctx,
+                approval_id=approval_id
+                if decision_for(definition.level) is ToolAccessDecision.APPROVAL_REQUIRED
+                else None,
                 error_code=exc.code,
                 error_message=exc.message,
                 latency_ms=_ms(started),
@@ -211,6 +224,9 @@ class ToolGateway:
             status=ToolCallStatus.SUCCEEDED,
             params=params,
             ctx=ctx,
+            approval_id=approval_id
+            if decision_for(definition.level) is ToolAccessDecision.APPROVAL_REQUIRED
+            else None,
             result=data,
             latency_ms=latency,
         )
@@ -218,6 +234,69 @@ class ToolGateway:
             "tool executed | tool=%s level=%s latency=%sms", tool_name, definition.level.name, latency
         )
         return data
+
+    # ------------------------------------------------------------------ 审批
+
+    @staticmethod
+    def _extract_approval_id(params: dict[str, Any]) -> UUID | None:
+        """从参数里取审批 id。带了但格式不对就拒绝 —— 别让它悄悄变成 None。"""
+        raw = params.get("approval_id")
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return None
+        try:
+            return UUID(str(raw))
+        except ValueError as exc:
+            raise ToolDeniedError(
+                "approval_id is not a valid UUID",
+                code="APPROVAL_ID_INVALID",
+            ) from exc
+
+    async def _ensure_approval_usable(
+        self, approval_id: UUID, *, definition: ToolDefinition, ctx: ToolContext
+    ) -> Any:
+        """审批要能用，必须同时满足四件事。
+
+        缺任何一件都拒绝，且错误码分开 —— 调用方要能分辨
+        「没批」「批的是别的工具」「批的是别的需求」「已经用过」。
+        """
+        approval = await self._approvals.get(approval_id)
+        if approval is None:
+            raise NotFoundError(f"Approval {approval_id} does not exist", code="APPROVAL_NOT_FOUND")
+
+        if approval.tool_name != definition.name:
+            raise ToolDeniedError(
+                "This approval was issued for a different tool",
+                code="APPROVAL_TOOL_MISMATCH",
+                details={"approval_tool": approval.tool_name, "requested_tool": definition.name},
+            )
+
+        if approval.requirement_id != ctx.requirement_id:
+            raise ToolDeniedError(
+                "This approval belongs to a different requirement",
+                code="APPROVAL_REQUIREMENT_MISMATCH",
+            )
+
+        # 惰性过期：先把真实状态落库，再判断能不能用
+        actual = effective_status(ApprovalStatus(approval.status), approval.expires_at)
+        if actual is not ApprovalStatus(approval.status):
+            approval.status = actual.value
+            await self._session.commit()
+        if actual is not ApprovalStatus.APPROVED:
+            raise ApprovalRequiredError(
+                f"Approval {approval_id} has not been approved yet (status: {actual})",
+                code="APPROVAL_NOT_APPROVED",
+                details={"approval_id": str(approval_id), "current_status": str(actual)},
+            )
+
+        # 重放检查：一条审批只换一次成功执行。没有这条，批准一次就能反复写盘
+        if await self._calls.has_succeeded_with_approval(approval_id):
+            raise ToolDeniedError(
+                "This approval has already been used by a successful execution",
+                code="APPROVAL_ALREADY_USED",
+                details={"approval_id": str(approval_id)},
+            )
+
+        return approval
 
     # ------------------------------------------------------------------ 审批
 
@@ -268,6 +347,7 @@ class ToolGateway:
         status: ToolCallStatus,
         params: dict[str, Any],
         ctx: ToolContext,
+        approval_id: UUID | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
         result: dict[str, Any] | None = None,
@@ -280,6 +360,7 @@ class ToolGateway:
             tool_name=tool_name,
             level=level.name if level else "UNKNOWN",
             status=status.value,
+            approval_id=approval_id,
             params_json=json.dumps(params, ensure_ascii=False, default=str),
             result_summary=_summarize(result),
             error_code=error_code,

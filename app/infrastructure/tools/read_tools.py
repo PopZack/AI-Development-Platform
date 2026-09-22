@@ -13,7 +13,7 @@ Prompt，返回 5000 个文件等于把上下文撑爆，还烧钱。上限到�
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -63,27 +63,17 @@ class ToolRequest:
 
 @dataclass(frozen=True)
 class ToolDefinition:
-    """一个可被 Agent 调用的工具：名字、等级、怎么执行。"""
+    """一个可被 Agent 调用的工具：名字、等级、怎么执行、参数长什么样。
+
+    ``parameter_schema`` 是给 Prompt 看的参数说明 —— Agent 不知道参数结构就只能瞎猜。
+    跟着工具定义走，而不是集中放一张表：加新工具时想忘都忘不掉。
+    """
 
     name: str
     level: ToolLevel
     description: str
     handler: Callable[[ToolRequest], Awaitable[dict[str, Any]]]
-
-    @property
-    def parameter_schema(self) -> dict[str, Any]:
-        """参数说明（给 Prompt 用）。刻意手写而不做 Pydantic 化：这里只有三个工具。"""
-        return _PARAM_DOCS.get(self.name, {})
-
-
-_PARAM_DOCS: dict[str, dict[str, Any]] = {
-    "list_files": {"path": "string（可选）— 相对工作区根的目录，默认根目录"},
-    "read_file": {"path": "string（必填）— 相对工作区根的文件路径"},
-    "search_code": {
-        "query": "string（必填）— 要搜索的子串（区分大小写）",
-        "path": "string（可选）— 只在这个子目录里搜",
-    },
-}
+    parameter_schema: dict[str, Any] = field(default_factory=dict)
 
 
 def _skip(path: Path) -> bool:
@@ -186,17 +176,23 @@ READ_TOOLS: tuple[ToolDefinition, ...] = (
         level=ToolLevel.L1,
         description="列出工作区内的文件与目录（递归，跳过依赖与缓存目录）",
         handler=_list_files,
+        parameter_schema={"path": "string（可选）— 相对工作区根的目录，默认根目录"},
     ),
     ToolDefinition(
         name="read_file",
         level=ToolLevel.L1,
         description="读取工作区内一个文本文件的内容（最大 200KB，超出会截断）",
         handler=_read_file,
+        parameter_schema={"path": "string（必填）— 相对工作区根的文件路径"},
     ),
     ToolDefinition(
         name="search_code",
         level=ToolLevel.L1,
         description="在工作区文本文件里按子串搜索，返回文件 / 行号 / 行内容",
         handler=_search_code,
+        parameter_schema={
+            "query": "string（必填）— 要搜索的子串（区分大小写）",
+            "path": "string（可选）— 只在这个子目录里搜",
+        },
     ),
 )

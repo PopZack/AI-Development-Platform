@@ -37,6 +37,11 @@ class ToolCall(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     level: Mapped[str] = mapped_column(String(8), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
 
+    #: L4 工具消费掉的审批。「一条审批只能换一次成功执行」就靠查这张表判重放
+    approval_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("approvals.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
     #: 只存工具的入参。文件路径没问题；如果将来有带密钥的工具，这里要脱敏
     params_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
