@@ -32,7 +32,10 @@ REQUIREMENT_TRANSITIONS: dict[RequirementStatus, frozenset[RequirementStatus]] =
         {RequirementStatus.ANALYZING, RequirementStatus.COMPLETED, RequirementStatus.CANCELLED}
     ),
     RequirementStatus.COMPLETED: frozenset(),
-    RequirementStatus.FAILED: frozenset(),
+    # 失败必须**可恢复**：一次模型调用抖动就把需求永久锁死、只能手工改库才能救回来，
+    # 那是设计缺陷不是安全边界。所以 FAILED 允许重新分析，也允许取消。
+    # （Agent 运行失败时会把需求标成 FAILED，见 application/agent_service.py）
+    RequirementStatus.FAILED: frozenset({RequirementStatus.ANALYZING, RequirementStatus.CANCELLED}),
     RequirementStatus.CANCELLED: frozenset(),
 }
 

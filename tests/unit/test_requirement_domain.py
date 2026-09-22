@@ -24,11 +24,20 @@ def test_designed_can_be_reanalyzed() -> None:
 
 
 def test_terminal_requirement_cannot_change_status() -> None:
-    for status in (RequirementStatus.COMPLETED, RequirementStatus.CANCELLED, RequirementStatus.FAILED):
+    """COMPLETED / CANCELLED 是终态。FAILED 刻意不是 —— 见下一个用例。"""
+    for status in (RequirementStatus.COMPLETED, RequirementStatus.CANCELLED):
         assert is_terminal(status)
         with pytest.raises(ConflictError) as excinfo:
             ensure_transition(status, RequirementStatus.ANALYZING)
         assert excinfo.value.code == "REQUIREMENT_STATUS_CONFLICT"
+
+
+def test_failed_requirement_is_recoverable() -> None:
+    """失败必须可恢复：一次模型调用抖动就把需求永久锁死、只能手工改库才能救回来，
+    那是设计缺陷不是安全边界。"""
+    assert not is_terminal(RequirementStatus.FAILED)
+    assert ensure_transition(RequirementStatus.FAILED, RequirementStatus.ANALYZING) is None
+    assert ensure_transition(RequirementStatus.FAILED, RequirementStatus.CANCELLED) is None
 
 
 def test_illegal_transition_reports_allowed_targets() -> None:

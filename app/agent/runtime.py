@@ -69,12 +69,17 @@ class AgentContext:
 
 @dataclass
 class AgentOutcome:
-    """成功的结果。``run`` 是最后那次（成功那次）的记录，便于调用方取 usage。"""
+    """成功的结果。
+
+    ``agent_run_id`` 是**成功那一次**的 agent_runs 主键 —— artifact 要挂在它上面，
+    这样「这份 PRD 是哪次调用产出的」可以一路查到原始输出与 token 用量。
+    """
 
     output: BaseModel
     raw_content: str
     attempts: int
     execution_id: UUID
+    agent_run_id: UUID | None = None
     model: str | None = None
     usage: LLMUsage = field(default_factory=LLMUsage)
     latency_ms: int = 0
@@ -137,7 +142,7 @@ class AgentRuntime:
             parsed, failure = self._parse_and_validate(spec, response.content)
 
             if parsed is not None:
-                await self._record(
+                run = await self._record(
                     execution_id=execution_id,
                     attempt=attempt,
                     spec=spec,
@@ -163,6 +168,7 @@ class AgentRuntime:
                     raw_content=response.content,
                     attempts=attempt,
                     execution_id=execution_id,
+                    agent_run_id=run.id,
                     model=response.model,
                     usage=response.usage,
                     latency_ms=latency_ms,

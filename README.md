@@ -178,6 +178,35 @@ Stage 4 和 Stage 3。现在加上只会是一组点了没反应的接口，比�
 > 但**没说它们的区别**。本项目的划分：`status` 是 §3.3 那台状态机（对外可见的阶段），
 > `current_step` 是该阶段内部正在等哪个环节（排障粒度，取值见 `WorkflowStep`）。
 
+### Agent 接口（Stage 3，会真的调模型）
+
+| Method | Path | 要求 | 说明 |
+|---|---|---|---|
+| POST | `/requirements/{id}/analyze` | **OWNER / DEVELOPER** | Product Agent 生成 PRD。状态 `DRAFT → ANALYZING` |
+| POST | `/requirements/{id}/plan` | **OWNER / DEVELOPER** | Architect Agent 生成技术设计。状态 `ANALYZING → DESIGNED`，**必须先 analyze** |
+| GET | `/requirements/{id}/artifacts` | 项目成员（含 VIEWER） | 列出交付物，按版本升序，可用 `type=PRD/ARCHITECTURE` 过滤 |
+
+**两个要提前知道的特性：**
+
+- **慢**：同步接口，实测一次 20~40 秒（等模型返回）。文档 §13 的异步执行 + SSE 属 Stage 5。
+  因此 `LLM_TIMEOUT_SECONDS` 默认已调到 180 —— 60s 会超时（504），需求会被标成 `FAILED`。
+- **花钱**：每次几十到几千 token。VIEWER 能看结果但不能触发。
+
+流程与失败语义：
+
+```
+DRAFT --analyze--> ANALYZING --plan--> DESIGNED
+                     ↑                  │
+                     └──── re-analyze ──┘   （需求改了要重跑）
+任意非终态 --失败--> FAILED --analyze--> （可恢复，不会永久锁死）
+```
+
+- 产出写两处：`artifacts`（按版本递增，保留历史）+ `requirements.prd_json`（当前版本快照）。
+  只有 PRD 有需求列可写；技术设计只落 `artifacts`，当前版本靠 version 最大的那条。
+- 模型输出未通过 Schema 校验（重试 2 次仍不行）→ 需求变 `FAILED` 并返回 502，
+  重新调用即可重试。**校验没过的内容绝不会写进交付物。**
+- `agent_runs` 刻意不通过 API 暴露：那是运维排障数据（每次尝试的原文、token、耗时、失败原因）。
+
 ### 权限模型
 
 只有 **项目级** 角色，没有全局管理员（设计文档只定义了 Owner / Developer）：

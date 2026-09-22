@@ -103,6 +103,14 @@ class MockLLMProvider(LLMProvider):
 
     # ------------------------------------------------------------ 测试辅助
 
+    def enqueue(self, *items: ScriptItem) -> None:
+        """往脚本尾部追加响应。
+
+        用于「先让前几次失败、验证失败路径，再补一条成功响应验证可恢复」这类用例 ——
+        构造时无法预知要追加几条，只能事后补。
+        """
+        self._script.extend(items)
+
     @property
     def remaining(self) -> int:
         """脚本还剩几条。测试里用它断言「重试确实多调了一次」。"""

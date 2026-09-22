@@ -42,13 +42,27 @@ class ArtifactRepository(BaseRepository[Artifact]):
     model = Artifact
 
     async def list_by_requirement(
-        self, requirement_id: UUID, *, artifact_type: ArtifactType | None = None
+        self,
+        requirement_id: UUID,
+        *,
+        artifact_type: ArtifactType | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[Artifact]:
         stmt = select(Artifact).where(Artifact.requirement_id == requirement_id)
         if artifact_type is not None:
             stmt = stmt.where(Artifact.type == artifact_type.value)
-        stmt = stmt.order_by(Artifact.created_at.asc())
+        # 按版本升序：调用方看到的顺序和「第几版」一致
+        stmt = stmt.order_by(Artifact.version.asc(), Artifact.created_at.asc()).limit(limit).offset(offset)
         return list((await self.session.execute(stmt)).scalars().all())
+
+    async def count_by_requirement(
+        self, requirement_id: UUID, *, artifact_type: ArtifactType | None = None
+    ) -> int:
+        stmt = select(func.count()).select_from(Artifact).where(Artifact.requirement_id == requirement_id)
+        if artifact_type is not None:
+            stmt = stmt.where(Artifact.type == artifact_type.value)
+        return int((await self.session.execute(stmt)).scalar_one())
 
     async def next_version(self, requirement_id: UUID, artifact_type: ArtifactType) -> int:
         """同一需求 + 同类型交付物的下一个版本号。

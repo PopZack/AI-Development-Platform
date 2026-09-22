@@ -15,6 +15,7 @@ from fastapi import Depends, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.agent_service import AgentService
 from app.application.auth_service import AuthService
 from app.application.project_service import ProjectService
 from app.application.requirement_service import RequirementService
@@ -34,6 +35,7 @@ __all__ = [
     "UserServiceDep",
     "ProjectServiceDep",
     "RequirementServiceDep",
+    "AgentServiceDep",
     "WorkflowServiceDep",
     "CurrentUserDep",
     "LimitQuery",
@@ -89,10 +91,16 @@ def get_workflow_service(session: SessionDep) -> WorkflowService:
     return WorkflowService(session)
 
 
+def get_agent_service(session: SessionDep, provider: LLMProviderDep) -> AgentService:
+    # max_output_attempts 先用 Runtime 的默认值（2）；要调参再加配置项
+    return AgentService(session, provider)
+
+
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
 UserServiceDep = Annotated[UserService, Depends(get_user_service)]
 ProjectServiceDep = Annotated[ProjectService, Depends(get_project_service)]
 RequirementServiceDep = Annotated[RequirementService, Depends(get_requirement_service)]
+AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
 WorkflowServiceDep = Annotated[WorkflowService, Depends(get_workflow_service)]
 
 # auto_error=False 是刻意的：HTTPBearer 默认的失败行为是抛 403 且响应体不符合

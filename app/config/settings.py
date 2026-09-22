@@ -53,7 +53,9 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     llm_api_key: str = ""
     llm_model: str = ""
-    llm_timeout_seconds: float = 60.0
+    # Agent 一次调用实测 20~40 秒（PRD / 架构这类长输出），60s 会超时。
+    # 只作用于 LLM 的 HTTP 客户端，不影响其它接口的响应时间。
+    llm_timeout_seconds: float = 180.0
     llm_max_retries: int = 2
 
     # ---------- 本地工作区（Stage 4 生效）----------
