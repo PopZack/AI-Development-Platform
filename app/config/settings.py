@@ -65,11 +65,12 @@ class Settings(BaseSettings):
         return self.database_url.startswith("sqlite")
 
     @model_validator(mode="after")
-    def _guard_production_secrets(self) -> Settings:
-        """生产环境绝不允许用默认密钥或过短的密钥 —— 否则令牌可被伪造。
+    def _guard_production_config(self) -> Settings:
+        """生产环境不许带着占位配置跑起来。
 
         这条护栏写在配置层而不是部署脚本里：配置错了就应该起不来，
-        而不是带着一个众所周知的口令安静地跑起来。
+        而不是带着一个众所周知的口令、或者一个永远返回假数据的 Mock
+        安静地跑在生产上。本地/测试环境不受影响 —— 否则开发时会被它拦住。
         """
         if self.app_env != "prod":
             return self
@@ -85,6 +86,15 @@ class Settings(BaseSettings):
                 f"JWT_SECRET_KEY must be at least {MIN_JWT_SECRET_BYTES} bytes "
                 f"for {self.jwt_algorithm}, got {actual_bytes}"
             )
+
+        if self.llm_provider.strip().lower() == "mock":
+            # Mock 返回固定内容。生产上用它等于整个平台在演假戏，
+            # 而且从接口响应上完全看不出来
+            raise ValueError("LLM_PROVIDER=mock must not be used with APP_ENV=prod")
+
+        if not self.llm_api_key.strip() or not self.llm_model.strip():
+            raise ValueError("LLM_API_KEY and LLM_MODEL must be set before APP_ENV=prod")
+
         return self
 
 

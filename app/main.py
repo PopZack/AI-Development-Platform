@@ -29,36 +29,43 @@ from app.infrastructure.db.session import (
     create_engine,
     dispose_engine,
 )
+from app.infrastructure.llm.factory import create_llm_provider
 
 logger = logging.getLogger(__name__)
 
 DESCRIPTION = """
-AI Dev Team —— 本地 AI 软件开发团队协作平台。
+AI Dev Team —— AI 软件开发团队协作平台。
 
-当前实现进度：**Stage 1（基础 API + 业务数据）**。
+当前实现进度：**Stage 2 完成**（认证 / 资源级权限 / 工作流幂等键）；
+Stage 3 进行中（LLM Provider 抽象已就位，Agent 与结构化输出校验待接）。
 
-已实现：用户 / 项目 / 项目成员 / 需求的 CRUD、统一错误格式、request_id 贯穿。
-未实现（按设计文档的分阶段计划推进）：JWT 认证与资源级权限（Stage 2）、
-Agent Runtime 与 PRD / 架构生成（Stage 3）、工作流状态机 + Tool Gateway + 审批（Stage 4）。
+已实现：JWT 认证与会话撤销、Owner/Developer/Viewer 项目级权限、用户 / 项目 /
+需求 / 工作流的完整接口、统一错误格式、request_id 贯穿。
+未实现：Agent Runtime 与 PRD / 架构生成（Stage 3）、工作流状态机 +
+Tool Gateway + 审批（Stage 4）。
 """.strip()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
+    llm_provider = app.state.llm_provider
 
     configure_database(create_engine(settings))
     await create_all()
 
     logger.info(
-        "%s started | env=%s | db=%s",
+        "%s started | env=%s | db=%s | llm_provider=%s",
         settings.app_name,
         settings.app_env,
         settings.database_url,
+        llm_provider.name,
     )
     try:
         yield
     finally:
+        # Provider 可能持有连接池，不关会留下未回收的 socket
+        await llm_provider.aclose()
         await dispose_engine()
         logger.info("%s stopped", settings.app_name)
 
@@ -78,6 +85,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         debug=False,
     )
     app.state.settings = settings
+    # Provider 在这里装配（而不是在 lifespan 里）是为了让测试能替换：
+    # app.state.llm_provider = MockLLMProvider(script=[...]) 即可，无需改环境变量
+    app.state.llm_provider = create_llm_provider(settings)
 
     # 中间件要在路由之前挂，否则 request_id 覆盖不到最早的异常
     app.add_middleware(RequestContextMiddleware)

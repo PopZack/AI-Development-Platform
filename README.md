@@ -246,6 +246,87 @@ Authorization: Bearer <access_token>
 
 ---
 
+## LLM Provider 抽象（Stage 3）
+
+```
+app/infrastructure/llm/
+├── base.py      LLMProvider 抽象 + LLMMessage / LLMRequest / LLMResponse / LLMUsage
+├── errors.py    失败分类（关键：区分可重试 / 不可重试）
+├── retry.py     传输层重试（指数退避，只重试可恢复的失败）
+├── ark.py       火山方舟实现（唯一允许出现「方舟」的地方）
+├── mock.py      Mock 实现（测试替身，长期保留）
+└── factory.py   按 LLM_PROVIDER 装配 —— 全项目只有这里知道有哪些供应商
+```
+
+**Agent 层只依赖 `LLMProvider` 抽象，供应商 SDK 不渗透进去**（文档 §14.1）。
+换供应商 = 新增一个实现类 + 改配置，Agent / Prompt / 校验层一行不动。
+
+刻意**不引第三方 SDK**（openai / volcengine 等），只用 httpx：少一层依赖、
+少一处版本漂移，而且各家 SDK 的异常类型不统一，抽象层反而更难做得干净。
+Ark 的 `/api/v3/chat/completions` 本身就是 OpenAI 兼容协议。
+
+### 两类「重试」必须分清
+
+| | 传输层重试（`retry.py`） | 内容层重试（Stage 3 Agent Runtime） |
+|---|---|---|
+| 触发 | 超时、网络抖动、5xx、429 | 模型回的内容不是合法 JSON / 不合 Schema |
+| 谁管 | 重试装饰器 | Agent Runtime |
+
+混成一个「最多重试 N 次」会很糟：模型稳定地回错误 JSON 时传输层白等三轮退避，
+而网络抖动时内容层又跑去重写 Prompt。**401 / 403 / 400 一次都不重试** ——
+它们重试一万次也一样失败，只会把真正的配置问题埋进重试日志里。
+
+### ⚠️ 火山方舟：两套端点不能混用
+
+官方文档明确警告，配错的表现是 **401**，而且报错信息不会告诉你是配错了：
+
+| | 平台端点 | Coding Plan 企业版 |
+|---|---|---|
+| Base URL | `https://ark.cn-beijing.volces.com/api/v3` | `https://ark.cn-beijing.volces.com/api/coding/v3` |
+| 模型名 | 带日期后缀，如 `deepseek-v4-flash-260425`；或自建接入点的 `ep-xxxx` | 短名，如 `deepseek-v4-flash` |
+| API Key | 平台 API Key（`ek-` 开头） | **专属 Key，与平台 Key 不是同一个** |
+
+`llm_api_key` / `llm_base_url` / `llm_model` 三者必须配成**同一套**。
+另外官方提示：非 Coding Plan 调用不要走 `/api/v3` 以外的路径，用错端点会产生额外费用。
+
+### Mock Provider 为什么长期保留
+
+不是临时脚手架。有些分支用真实模型**根本没法稳定复现** —— 最典型的就是
+「模型返回了非法 JSON 时，系统必须拒绝而不是把半成品落库」（文档 §14.3）。
+你不可能靠反复真实调用来等模型输出坏 JSON。
+
+```python
+# 按脚本依次返回；脚本里可以混入异常，用来驱动重试与失败处理
+MockLLMProvider(script=[LLMTimeoutError("boom"), '{"title": "ok"}'])
+
+# 不传脚本 → 永远返回带醒目 _mock 标记的 JSON（本地手跑用，不会被误认成模型输出）
+MockLLMProvider()
+```
+
+脚本用完会**报错**而不是静默回落到默认内容 —— 否则「测试少写了一条响应」
+会变成一个看起来通过、其实没测到东西的用例。
+
+### Ark 实现怎么在没有有效密钥时测试
+
+`ArkLLMProvider` 支持注入 `transport`，所以能用 `httpx.MockTransport` 验证
+**「我们到底发出了什么请求」**（URL / 认证头 / 请求体字段）以及**各类失败被映射成哪一种错误**。
+Provider 抽象层最容易出的问题就是请求构造错了，而这类问题用真实调用只会看到一个
+笼统的 400/401，极难定位。
+
+密钥的**有效性与模型名归属**只能在真实调用里验证 —— 那是单独的连通性检查，不属于单元测试。
+
+### 生产环境护栏
+
+`APP_ENV=prod` 时，以下配置会让应用**直接启动失败**（而不是带着占位配置安静地跑）：
+
+- `JWT_SECRET_KEY` 仍是默认值，或短于 32 字节
+- `LLM_PROVIDER=mock`（生产上用 Mock 等于整个平台在演假戏，从响应上完全看不出来）
+- `LLM_API_KEY` / `LLM_MODEL` 为空
+
+本地/测试环境不受影响 —— 否则还没申请到密钥时开发会被拦死。
+
+---
+
 ## 数据库
 
 首期核心表（已建）：`users`、`projects`、`project_members`、`requirements`、`workflow_runs`
@@ -286,7 +367,7 @@ Authorization: Bearer <access_token>
 |---|---|---|
 | Stage 1 | 基础 API + 用户/项目/需求 CRUD + 统一错误 + pytest | ✅ 已完成 |
 | Stage 2 | JWT 认证、密码哈希接入、Owner/Developer 角色、资源级权限、幂等键 | ✅ 已完成 |
-| Stage 3 | LLM Provider 抽象、Product / Architect Agent、结构化输出校验、Agent Run 记录 | 下一步 |
+| Stage 3 | LLM Provider 抽象、Product / Architect Agent、结构化输出校验、Agent Run 记录 | 🔄 进行中（Provider 抽象 + Mock 已完成；Agent 与结构化输出校验待做） |
 | Stage 4 | 工作流状态机、Developer / Tester / Reviewer、Tool Gateway、审批、交付物汇总 | 待开始 |
 | Stage 5 | Redis 限流、SSE、真实测试执行、Alembic、MySQL 兼容、简易 Web UI（可选增强） | 不阻塞交付 |
 

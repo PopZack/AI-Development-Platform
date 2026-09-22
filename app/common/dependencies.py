@@ -23,11 +23,13 @@ from app.application.workflow_service import WorkflowService
 from app.common.exceptions import AuthenticationError
 from app.config.settings import Settings
 from app.infrastructure.db.session import get_session
+from app.infrastructure.llm.base import LLMProvider
 from app.models.user import User
 
 __all__ = [
     "SessionDep",
     "SettingsDep",
+    "LLMProviderDep",
     "AuthServiceDep",
     "UserServiceDep",
     "ProjectServiceDep",
@@ -52,6 +54,19 @@ def get_app_settings(request: Request) -> Settings:
 
 
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]
+
+
+def get_llm_provider(request: Request) -> LLMProvider:
+    """取当前 app 实例装配好的 LLM Provider。
+
+    和 settings 一样从 ``app.state`` 取：这样测试可以直接
+    ``app.state.llm_provider = MockLLMProvider(script=[...])`` 换掉它，
+    不用改环境变量，也不用做 import 级别的猴补丁。
+    """
+    return request.app.state.llm_provider
+
+
+LLMProviderDep = Annotated[LLMProvider, Depends(get_llm_provider)]
 
 
 def get_auth_service(session: SessionDep, settings: SettingsDep) -> AuthService:
