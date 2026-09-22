@@ -276,18 +276,34 @@ Ark 的 `/api/v3/chat/completions` 本身就是 OpenAI 兼容协议。
 而网络抖动时内容层又跑去重写 Prompt。**401 / 403 / 400 一次都不重试** ——
 它们重试一万次也一样失败，只会把真正的配置问题埋进重试日志里。
 
-### ⚠️ 火山方舟：两套端点不能混用
+### ⚠️ 火山方舟：三条路径，配错的表现是 401
 
-官方文档明确警告，配错的表现是 **401**，而且报错信息不会告诉你是配错了：
+方舟至少有三条 base URL，**key 的权限范围是按路径划分的**。
+配错的表现是 `401 The API key or AK/SK in the request is missing or invalid.`
+—— **报错信息不会告诉你是端点配错了**，只会让你以为密钥无效。
 
-| | 平台端点 | Coding Plan 企业版 |
-|---|---|---|
-| Base URL | `https://ark.cn-beijing.volces.com/api/v3` | `https://ark.cn-beijing.volces.com/api/coding/v3` |
-| 模型名 | 带日期后缀，如 `deepseek-v4-flash-260425`；或自建接入点的 `ep-xxxx` | 短名，如 `deepseek-v4-flash` |
-| API Key | 平台 API Key（`ek-` 开头） | **专属 Key，与平台 Key 不是同一个** |
+| | 平台端点 | Agent Plan | Coding Plan |
+|---|---|---|---|
+| Base URL | `.../api/v3` | `.../api/plan/v3` | `.../api/coding/v3` |
+| 模型名 | 带日期后缀，如 `deepseek-v4-flash-260425`；或自建接入点的 `ep-xxxx` | 短名，如 `deepseek-v4-flash` | 短名 |
+| Key | 平台 API Key（`ek-` 开头） | **Plan 专属 Key** | **另一个 Plan 专属 Key** |
 
 `llm_api_key` / `llm_base_url` / `llm_model` 三者必须配成**同一套**。
-另外官方提示：非 Coding Plan 调用不要走 `/api/v3` 以外的路径，用错端点会产生额外费用。
+
+本项目实测结论（2026-09-22，用同一个 Plan Key 打三条路径）：
+
+| 路径 | `deepseek-v4-flash` | `doubao-seed-2-1-pro` |
+|---|---|---|
+| `/api/plan/v3` | ✅ 200 | `404 does not support the agent plan feature` |
+| `/api/coding/v3` | `401`（key 不适用于这条 plan） | `404 does not support the coding plan feature` |
+| `/api/v3` | `401` | `401` |
+
+两条经验：
+
+- **一条 plan 只覆盖部分模型。** 换模型要重新确认它在不在当前 plan 里，
+  否则拿到的是 404 而不是「模型不存在」。
+- **`401` 不完全等于「密钥无效」。** 先确认 `LLM_BASE_URL` 与 key 属于同一条路径。
+  排查时最省事的做法是用同一个 key 打三条路径做对照 —— 403/404 会告诉你它认了哪条。
 
 ### Mock Provider 为什么长期保留
 
