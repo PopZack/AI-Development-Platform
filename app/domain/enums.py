@@ -27,6 +27,7 @@ __all__ = [
     "AgentRole",
     "AgentRunStatus",
     "ArtifactType",
+    "ToolCallStatus",
 ]
 
 
@@ -186,3 +187,17 @@ class ArtifactType(StrEnum):
     PATCH = "PATCH"
     TEST_REPORT = "TEST_REPORT"
     REVIEW = "REVIEW"
+
+
+class ToolCallStatus(StrEnum):
+    """一次工具调用的结果。
+
+    ``APPROVAL_REQUIRED`` 刻意单独成一个状态而不是并进 ``DENIED``：
+    前者的后续动作是「去走审批」，后者的后续动作是「换工具」。
+    两者混用，审批流程就没法从审计记录里筛出来。
+    """
+
+    SUCCEEDED = "SUCCEEDED"
+    DENIED = "DENIED"
+    APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
+    FAILED = "FAILED"

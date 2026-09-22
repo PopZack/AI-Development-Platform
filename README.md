@@ -434,6 +434,59 @@ Provider 抛出的网络/超时/限流错误已由 `RetryingLLMProvider` 处理�
 
 ---
 
+## Tool Gateway（Stage 4）
+
+```
+app/infrastructure/tools/
+├── paths.py       路径校验：解析为规范化路径后判断是否在授权根内
+├── read_tools.py  L1 工具的真实实现（list_files / read_file / search_code）
+└── gateway.py     唯一入口：查工具 → 权限判断 → 执行 → 落审计
+```
+
+**Gateway 是 Agent 调工具的唯一入口。** 权限分级、路径校验、「L1 允许并记录」
+三条约束，只有在所有调用都过同一道门时才成立 —— 任何一个 Agent 自己直接
+`open()` 文件，三条就同时失效，而且从代码上完全看不出来。
+
+### 权限等级（文档 §14.1）
+
+| 等级 | 含义 | 处置 |
+|---|---|---|
+| L0 | 读已授权上下文 | 允许 |
+| L1 | 读代码 · 搜索 | 允许，**并记录** |
+| L2 | 生成 Patch | 允许，要过路径与规则检查 |
+| L3 | 运行测试和有限命令 | 允许，白名单 |
+| L4 | 应用变更 | **需人工审批**（不是拒绝） |
+| L5 | 部署 · 删数据 · 改权限 | **首期禁止** |
+
+**L4 不是「被拒绝」，而是「需要人点头」。** 两者混成一个 DENIED，工作流就没法在
+「等审批」这个状态停下来 —— 而人工审批恰恰是流程 B 里不可省略的一步。
+对应地 `tool_calls.status` 里 `APPROVAL_REQUIRED` 与 `DENIED` 是两个独立取值，
+审批流程要能从审计里筛出来，靠的就是这一条。
+
+### 路径校验：为什么不能用字符串前缀
+
+文档 §14.1 原文：*「路径校验必须解析为规范化路径后判断是否在授权工作区根内，
+不能用字符串前缀判断。」* 字符串前缀在这些情况会误判：
+
+- `/workspace` 前缀匹配 `/workspace-evil/x` —— 两个完全不同的目录
+- `/workspace/../etc/passwd` —— 前缀匹配，真实位置在 /etc
+- 符号链接 `/workspace/link` 指向 `/etc` —— 字符串看着在里面
+
+实现是 `(workspace_root / raw).resolve()` 之后 `is_relative_to(root)`，
+相对路径一律相对**授权根**解析（不是相对进程当前目录）。测试里有
+`workspace-evil` 这个真实反例。
+
+### 审计记录
+
+`tool_calls` 表记录**每一次**调用的四种结局：SUCCEEDED / FAILED / DENIED /
+APPROVAL_REQUIRED，含入参、结果摘要、错误码、耗时。
+
+- **完整输出不进库**，只存 500 字符摘要 —— 完整输出可能上千行，塞库既贵又没用
+- **审计在 Gateway 自己的事务里提交**，不跟外层业务事务走：
+  外层回滚时审计要留下来，出问题时你恰恰需要知道 Agent 做过什么
+
+---
+
 ## 数据库
 
 首期核心表（已建）：`users`、`projects`、`project_members`、`requirements`、`workflow_runs`、`agent_runs`、`artifacts`

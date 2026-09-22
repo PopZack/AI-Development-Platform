@@ -12,6 +12,7 @@ metadata 里就没有它的定义，建表会静默漏掉。所以新增模型�
 from app.models.agent import AgentRun, Artifact
 from app.models.project import Project, ProjectMember
 from app.models.requirement import Requirement
+from app.models.tool import ToolCall
 from app.models.user import User
 from app.models.workflow import WorkflowRun
 
@@ -21,6 +22,7 @@ __all__ = [
     "Project",
     "ProjectMember",
     "Requirement",
+    "ToolCall",
     "User",
     "WorkflowRun",
 ]
