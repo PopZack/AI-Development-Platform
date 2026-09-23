@@ -67,6 +67,7 @@ from app.domain.enums import (
 )
 from app.domain.project import READ_ROLES, WRITE_ROLES
 from app.domain.workflow import can_transition, ensure_transition
+from app.infrastructure.events import Event, get_event_bus
 from app.infrastructure.llm.base import LLMProvider
 from app.infrastructure.tools import ToolContext, ToolGateway
 from app.models.agent import Artifact
@@ -556,6 +557,20 @@ class WorkflowOrchestrator:
         current = WorkflowStatus(run.status)
         ensure_transition(current, target)
         run.status = target.value
+        # 事件可能比 commit 早几毫秒发出。可以接受：事件是「有人推了一下」的
+        # 通知，权威状态始终以 GET /runs/{id} 为准（客户端也必须这么用，
+        # 否则一次失败的 commit 会让前端停在一个不存在的状态上）
+        get_event_bus().emit(
+            Event(
+                type="workflow.status",
+                requirement_id=run.requirement_id,
+                payload={
+                    "run_id": str(run.id),
+                    "status": run.status,
+                    "current_step": run.current_step,
+                },
+            )
+        )
 
     def _expect(self, run: WorkflowRun, status: WorkflowStatus, step: WorkflowStep) -> None:
         if WorkflowStatus(run.status) is not status or WorkflowStep(run.current_step) is not step:
@@ -599,6 +614,17 @@ class WorkflowOrchestrator:
             content_json=content,
         )
         await self._artifacts.add(artifact)
+        get_event_bus().emit(
+            Event(
+                type="artifact.created",
+                requirement_id=requirement_id,
+                payload={
+                    "artifact_id": str(artifact.id),
+                    "type": artifact_type.value,
+                    "version": artifact.version,
+                },
+            )
+        )
         return artifact
 
     @staticmethod

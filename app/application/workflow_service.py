@@ -29,6 +29,7 @@ from app.common.exceptions import ConflictError, NotFoundError
 from app.domain.enums import RequirementStatus, WorkflowStatus, WorkflowStep
 from app.domain.project import READ_ROLES, WRITE_ROLES
 from app.domain.requirement import ensure_runnable
+from app.infrastructure.events import Event, get_event_bus
 from app.models.user import User
 from app.models.workflow import WorkflowRun
 from app.repositories.requirement_repository import RequirementRepository
@@ -102,6 +103,17 @@ class WorkflowService:
             return self._resolve_replay(winner, req_id), False
 
         logger.info("workflow run created | id=%s requirement=%s key=%s", run.id, req_id, idempotency_key)
+        get_event_bus().emit(
+            Event(
+                type="workflow.created",
+                requirement_id=req_id,
+                payload={
+                    "run_id": str(run.id),
+                    "status": run.status,
+                    "current_step": run.current_step,
+                },
+            )
+        )
         return run, True
 
     @staticmethod

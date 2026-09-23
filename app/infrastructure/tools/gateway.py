@@ -34,6 +34,7 @@ from app.common.exceptions import AppError, ApprovalRequiredError, NotFoundError
 from app.domain.approval import effective_status
 from app.domain.enums import ApprovalStatus, ToolCallStatus
 from app.domain.tool_levels import ToolAccessDecision, ToolLevel, decision_for
+from app.infrastructure.events import Event, get_event_bus
 from app.infrastructure.tools.patch_tools import PATCH_TOOLS
 from app.infrastructure.tools.paths import WorkspacePathValidator
 from app.infrastructure.tools.read_tools import READ_TOOLS, ToolDefinition, ToolRequest
@@ -170,6 +171,18 @@ class ToolGateway:
                     error_code="APPROVAL_REQUIRED",
                     error_message=f"Tool {tool_name} requires human approval",
                     latency_ms=_ms(started),
+                )
+                get_event_bus().emit(
+                    Event(
+                        type="approval.created",
+                        requirement_id=ctx.requirement_id,
+                        payload={
+                            "approval_id": str(approval.id),
+                            "tool_name": tool_name,
+                            "level": definition.level.name,
+                            "run_id": str(ctx.workflow_run_id) if ctx.workflow_run_id else None,
+                        },
+                    )
                 )
                 raise ApprovalRequiredError(
                     f"Tool {tool_name} requires human approval",

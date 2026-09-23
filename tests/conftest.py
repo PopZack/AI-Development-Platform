@@ -53,6 +53,12 @@ def test_settings(tmp_path: Path) -> Settings:
         llm_model="test-model",
         # 工作区也要关进 tmp：不设的话 ./workspace 会写进仓库目录
         workspace_root=str(tmp_path / "workspace"),
+        # 业务测试不该被限流影响：额度放大，限流本身由专门的用例验证
+        rate_limit_default_per_minute=100_000,
+        rate_limit_llm_per_minute=10_000,
+        rate_limit_auth_per_minute=10_000,
+        # SSE 心跳调小，测试不用等 15 秒
+        sse_heartbeat_seconds=0.2,
     )
 
 

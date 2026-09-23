@@ -62,6 +62,30 @@ class Settings(BaseSettings):
     # Tool Gateway 的授权根目录；所有文件工具路径必须规范化后落在它内部
     workspace_root: str = "./workspace"
 
+    # ---------- 限流（Stage 5：多人部署的前置条件）----------
+    rate_limit_enabled: bool = True
+    rate_limit_window_seconds: int = 60
+    # 默认额度按「一个页面正常操作」估：列表 / 详情 / 查看交付物都不会撞到
+    rate_limit_default_per_minute: int = 300
+    # 最贵的资源：一次 20~40 秒 + 真金白银的 token
+    rate_limit_llm_per_minute: int = 10
+    # 反口令爆破，按 IP
+    rate_limit_auth_per_minute: int = 20
+    # 挂在反向代理后面时必须开启，否则所有请求都算在代理的 IP 上
+    # （等于把全站限成一份额度，第一个用户就把额度用光）
+    rate_limit_trust_proxy: bool = False
+    # Redis 挂了是放行还是拒绝。默认放行：让保护措施的故障变成全站不可用，
+    # 是拿小风险换大风险。要更严就改成 False
+    rate_limit_fail_open: bool = True
+
+    # ---------- Redis（可选；多 worker 部署需要）----------
+    # 留空 = 单进程模式：限流走内存、事件走进程内广播。
+    # 多 worker 时不配 Redis 会出两个问题：限额被乘以 worker 数、
+    # SSE 事件只在产生它的那个 worker 上可见。启动时会告警。
+    redis_url: str = ""
+    # SSE 心跳间隔：代理（nginx 默认 60s）会掐掉长时间无数据的连接
+    sse_heartbeat_seconds: float = 15.0
+
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")

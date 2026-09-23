@@ -32,6 +32,7 @@ from app.application.project_access import ProjectAccessGuard
 from app.common.exceptions import NotFoundError
 from app.domain.approval import effective_status, ensure_pending
 from app.domain.enums import ApprovalStatus, ProjectRole
+from app.infrastructure.events import Event, get_event_bus
 from app.models.approval import Approval
 from app.models.user import User
 from app.repositories.approval_repository import ApprovalRepository
@@ -118,6 +119,18 @@ class ApprovalService:
             approval.tool_name,
             target.value,
             actor.id,
+        )
+        get_event_bus().emit(
+            Event(
+                type="approval.decided",
+                requirement_id=approval.requirement_id,
+                payload={
+                    "approval_id": str(approval.id),
+                    "tool_name": approval.tool_name,
+                    "status": approval.status,
+                    "reviewed_by": str(actor.id),
+                },
+            )
         )
         return approval
 

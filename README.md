@@ -433,6 +433,57 @@ Provider 抛出的网络/超时/限流错误已由 `RetryingLLMProvider` 处理�
 
 ---
 
+## 限流与实时事件（Stage 5：多人部署的前置条件）
+
+### 限流
+
+单人本地用时，限流只会碍事；**部署给多人用**是另一回事 —— 每个用户都能触发
+真实调模型的操作（一次 20~40 秒 + 花 token），一个手滑的循环就能把额度和机器打满。
+
+| 档位 | 匹配 | 默认额度 | 为什么单独设 |
+|---|---|---|---|
+| `llm` | analyze / plan / start / resume | **10 / 分钟** | 最贵的资源 |
+| `auth` | login / register | 20 / 分钟（按 IP） | 反口令爆破 |
+| `default` | 其余接口 | 300 / 分钟 | 防脚本乱扫 |
+
+- **限流键 = 令牌指纹**（`sha256(token)` 前 16 位），匿名请求按 IP；
+  auth 档永远按 IP —— 爆破者每换一个假令牌就重置额度等于没限
+- 通过时也回 `X-RateLimit-Limit` / `X-RateLimit-Remaining`，撞墙时回 `429` +
+  `Retry-After`，错误体与其它接口一致（前端不需要为它写特例）
+- `/health`、`/docs`、`/ui` 静态资源不计流量 —— 探针要能高频打，静态资源不该占用户额度
+- **Redis 不可用时放行并告警**（fail-open）。限流是保护措施，让保护措施的故障
+  变成全站不可用是拿小风险换大风险；要更严就把 `RATE_LIMIT_FAIL_OPEN=false`
+
+### 实时事件流（SSE）
+
+```
+GET /api/v1/requirements/{id}/events    该需求的事件（SSE）
+GET /api/v1/events                      全局事件（审批提醒等）
+```
+
+事件类型：`workflow.created` / `workflow.status` / `artifact.created` /
+`approval.created` / `approval.decided`。
+
+- **为什么是 SSE 不是 WebSocket**：事件是单向的，用户操作本来就走 POST。
+  SSE 是纯 HTTP，鉴权、代理、日志全都沿用现成的一套
+- **认证支持两种**：`Authorization: Bearer`（推荐）或 `?token=`（浏览器
+  `EventSource` 带不了自定义头）。⚠️ query 传令牌会进访问日志和浏览器历史 ——
+  这是显式取舍，我们的前端用 fetch 流式读，走的是请求头那条路
+- **断点续传（Last-Event-ID）刻意没做**：事件是「看当前进展」的旁路数据，
+  权威状态在 `GET /runs/{id}`，重连后拉一次状态即可
+- **多 worker 需要 Redis**：否则事件只在产生它的那个 worker 上可见
+
+实现里有两个必须记住的坑（都写进了代码注释和测试）：
+
+1. **不要用 `asyncio.wait_for(anext(订阅), timeout)` 做心跳**。超时会取消取件协程
+   并把那个异步生成器一起杀掉 —— 于是**第一次心跳之后事件永远不再送达**。
+   正确做法是取件任务常驻、只给「等待」加超时。
+2. **不要调 `request.is_disconnected()`**。它不是非阻塞检查；在 ASGI 测试传输下
+   请求体读完就等响应结束，于是「等断线」变成死锁。Starlette 的
+   `StreamingResponse` 自己会取消断线的生成器，够用了。
+
+---
+
 ## Tool Gateway（Stage 4）
 
 ```
@@ -626,7 +677,7 @@ APPROVAL_REQUIRED，含入参、结果摘要、错误码、耗时。
 | Stage 2 | JWT 认证、密码哈希接入、Owner/Developer 角色、资源级权限、幂等键 | ✅ 已完成 |
 | Stage 3 | LLM Provider 抽象、Product / Architect Agent、结构化输出校验、Agent Run 记录 | ✅ 已完成 |
 | Stage 4 | 工作流状态机、Developer / Tester / Reviewer、Tool Gateway、审批、交付物汇总 | ✅ 已完成（真实测试执行等按文档划入 Stage 5） |
-| Stage 5 | Redis 限流、SSE、真实测试执行、Alembic、MySQL 兼容、简易 Web UI（可选增强） | 不阻塞交付 |
+| Stage 5 | Redis 限流、SSE、真实测试执行、Alembic、MySQL 兼容、Web UI（可选增强） | 🔄 进行中（限流 + SSE + Web UI 已完成；真实测试执行 / Alembic / 容器化部署待做） |
 
 ---
 
