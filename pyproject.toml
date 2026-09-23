@@ -20,6 +20,10 @@ dependencies = [
 [project.optional-dependencies]
 mysql = [
     "aiomysql>=0.3.2",
+    "cryptography>=50.0.1",
+]
+redis = [
+    "redis>=8.1.0",
 ]
 
 [dependency-groups]

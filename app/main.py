@@ -99,11 +99,24 @@ def _warn_about_single_process_setup(settings: Settings, redis_client: object | 
     比在配置层猜一个 worker 数更诚实。
     """
     if redis_client is None:
-        logger.warning(
-            "REDIS_URL is not set: rate limiting is per-process and SSE events are "
-            "visible only on the worker that produced them. "
-            "Set REDIS_URL before running with multiple workers."
-        )
+        if settings.redis_url.strip():
+            # ⚠️ 「配了 URL 却拿不到客户端」与「没配」是两件事，不能报同一句话。
+            # 原来这两种情况都打 "REDIS_URL is not set"，于是运维照着这句话去查环境变量，
+            # 永远查不出真正的原因是**依赖没装**（redis 是可选依赖，compose 一度漏装，
+            # 结果部署时配了 REDIS_URL 仍然静默退化成进程内状态）。
+            logger.error(
+                "REDIS_URL is set but no Redis client could be created — "
+                "most likely the 'redis' package is not installed (`uv sync --extra redis`). "
+                "Falling back to per-process rate limiting and event broadcast: "
+                "with multiple workers the quota is multiplied by the worker count and "
+                "SSE events are visible only on the worker that produced them."
+            )
+        else:
+            logger.warning(
+                "REDIS_URL is not set: rate limiting is per-process and SSE events are "
+                "visible only on the worker that produced them. "
+                "Set REDIS_URL before running with multiple workers."
+            )
     if not settings.rate_limit_enabled:
         logger.warning("rate limiting is disabled (RATE_LIMIT_ENABLED=false)")
     if settings.app_env == "prod" and settings.auto_create_tables:

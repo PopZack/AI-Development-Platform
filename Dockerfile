@@ -23,9 +23,17 @@ WORKDIR /app
 
 # 先只拷依赖清单：依赖没变时这一层能命中缓存，改代码不会重装依赖
 COPY pyproject.toml uv.lock ./
-# 需要 MySQL 时把 --extra mysql 打开（compose 里就是这么用的）
+# 需要 MySQL / Redis 时传进来（compose 里传的是 "mysql,redis"）。
+# 逗号分隔而不是空格：ARG 用空格分隔时 shell 会把它拆成两个参数，
+# 而 --extra 只吃后面那个，前面的会变成 uv 的子命令 —— 那是很难看懂的错误。
+# 这里显式展开成重复的 --extra，避免依赖 uv 对 "a,b" 的解析行为。
 ARG EXTRAS=""
-RUN uv sync --frozen --no-dev ${EXTRAS:+"--extra"} ${EXTRAS:+$EXTRAS}
+RUN set -eu; \
+    flags=""; \
+    for extra in $(echo "$EXTRAS" | tr ',' ' '); do \
+        [ -n "$extra" ] && flags="$flags --extra $extra"; \
+    done; \
+    uv sync --frozen --no-dev $flags
 
 # ---------------------------------------------------------------- runtime
 FROM python:3.12-slim AS runtime

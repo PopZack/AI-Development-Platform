@@ -18,7 +18,11 @@ services:
     build:
       context: .
       args:
-        EXTRAS: "mysql"
+        # ⚠️ redis 也必须装：光配 REDIS_URL 不够 —— redis 是可选依赖，
+        # 镜像里没有它时应用只在日志里报错然后**静默退化成进程内状态**，
+        # 于是多 worker 下额度被乘以 worker 数、SSE 事件时有时无，
+        # 正好是「配了 Redis 想解决」的那两个问题。这是真踩过的坑。
+        EXTRAS: "mysql,redis"
     env_file: .env
     environment:
       APP_ENV: prod
