@@ -17,6 +17,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Protocol, runtime_checkable
 
+from app.common.security import mask_url
+
 __all__ = ["RedisLike", "create_redis"]
 
 logger = logging.getLogger(__name__)
@@ -63,13 +65,5 @@ def create_redis(url: str) -> Any | None:
 
     # decode_responses=True：事件信封是 JSON 字符串，拿到 bytes 还得手动解一次
     client = from_url(url, decode_responses=True)
-    logger.info("redis client created | url=%s", _mask_url(url))
+    logger.info("redis client created | url=%s", mask_url(url))
     return client
-
-
-def _mask_url(url: str) -> str:
-    """日志里不打密码。"""
-    if "@" not in url:
-        return url
-    scheme, _, rest = url.partition("://")
-    return f"{scheme}://***@{rest.rpartition('@')[2]}"

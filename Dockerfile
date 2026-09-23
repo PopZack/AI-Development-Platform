@@ -38,10 +38,11 @@ RUN set -eu; \
 # ---------------------------------------------------------------- runtime
 FROM python:3.12-slim AS runtime
 
-# curl 只用于容器健康检查；装完不清理 apt 缓存会让镜像大几十 MB
-RUN apt-get update \
- && apt-get install -y --no-install-recommends curl \
- && rm -rf /var/lib/apt/lists/*
+# 刻意**不装 curl**：原来为了健康检查 apt-get install curl，而这一层在
+# 国内网络下经常直接失败（deb.debian.org 超时或 404，实测报
+# "Failed to fetch http://deb.debian.org/debian/dists/trixie/main/binary-amd64/Packages 404"），
+# 为了一个健康检查把整个构建卡死并不划算。镜像里本来就有 Python ——
+# 用 urllib 探活即可：少一个 apt 层、镜像更小、构建不依赖 Debian 源。
 
 # 非 root：容器逃逸的成本更高，误写宿主文件的机会更小
 RUN useradd --create-home --uid 10001 appuser
@@ -67,7 +68,7 @@ USER appuser
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD curl -fsS http://127.0.0.1:8000/health || exit 1
+  CMD ["python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"]
 
 # 默认单 worker（不需要 Redis）。多 worker 用 compose 里的 command 覆盖
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

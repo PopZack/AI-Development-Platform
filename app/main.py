@@ -29,6 +29,7 @@ from app.common.rate_limit import (
     RedisRateLimiter,
 )
 from app.common.request_context import RequestContextMiddleware
+from app.common.security import mask_url
 from app.config.logging import setup_logging
 from app.config.settings import Settings, get_settings
 from app.infrastructure.db.session import (
@@ -74,7 +75,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         "%s started | env=%s | db=%s | llm_provider=%s | events=%s",
         settings.app_name,
         settings.app_env,
-        settings.database_url,
+        # ⚠️ 必须脱敏：连接串里带密码，而日志会被采集、转发、长期保存。
+        # 这条日志原本把 MySQL 密码明文打了 4 遍（每个 worker 一行），
+        # 一旦接上日志收集就等于把库密码公布出去。
+        mask_url(settings.database_url),
         llm_provider.name,
         "redis" if redis_client is not None else "in-process",
     )
@@ -119,6 +123,13 @@ def _warn_about_single_process_setup(settings: Settings, redis_client: object | 
             )
     if not settings.rate_limit_enabled:
         logger.warning("rate limiting is disabled (RATE_LIMIT_ENABLED=false)")
+    if settings.app_env == "prod" and settings.debug:
+        # DEBUG 会把根 logger 降到 DEBUG，于是 httpx / sqlalchemy 的内部日志全进日志流：
+        # 一行业务日志配几十行 httpcore 的 connect/tls 细节，既费存储又淹没真正的错误。
+        logger.warning(
+            "APP_ENV=prod 且 DEBUG=true：日志级别被降到 DEBUG，"
+            "httpx / sqlalchemy 的内部细节会全部进日志流，建议关掉"
+        )
     if settings.app_env == "prod" and settings.auto_create_tables:
         logger.warning(
             "APP_ENV=prod 且 AUTO_CREATE_TABLES=true：create_all 不会给已有表加列，"

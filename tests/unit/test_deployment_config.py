@@ -91,3 +91,143 @@ def test_mysql_extra_includes_cryptography() -> None:
         "MySQL 8 默认认证插件 caching_sha2_password 需要它，"
         "否则连接直接抛 RuntimeError"
     )
+
+
+# ------------------------------------------------------------------ 运行时依赖完整性
+#
+# 这一组的由来：镜像构建成功、容器起来后立刻崩在
+#   ModuleNotFoundError: No module named 'httpx'
+# 因为 httpx 只写在 dev 依赖组里，而 `app/infrastructure/llm/ark.py` 顶层就 import 它 ——
+# 开发机上 `uv sync` 装了 dev 组所以一切正常，**镜像里（--no-dev）没有 HTTP 客户端**，
+# 于是「能调模型」这个核心能力在部署时直接没了。
+#
+# 这类问题（导入写了、依赖放错地方）不会在本地暴露，只能靠构建+运行镜像发现 ——
+# 除非有一条静态检查。下面就是那条检查。
+
+# 导入名 → 发行包名不一致的少数几个（其余按同名处理）
+_IMPORT_TO_DISTRIBUTION = {
+    "argon2": "argon2-cffi",
+    "email_validator": "email-validator",
+    "jwt": "pyjwt",
+    "pydantic_settings": "pydantic-settings",
+    "yaml": "pyyaml",
+}
+
+# **刻意可选**的包：代码里延迟导入且有降级分支，装在 extra 里即可，不必进主依赖。
+# 往这里加东西前先想清楚：主依赖缺失会让镜像启动即崩，而 extra 缺失只会降级 ——
+# 只有当「没有它也能正常跑」时才放这里。
+_OPTIONAL_BY_DESIGN = {"redis"}
+
+
+def _normalize(name: str) -> str:
+    """把发行包名归一化：去掉版本号、extra、下划线连字符差异。"""
+    base = re.split(r"[<>=!\[;]", name, maxsplit=1)[0].strip().lower()
+    return base.replace("_", "-")
+
+
+def _root_dependencies(group: str) -> set[str]:
+    """从 pyproject 读根依赖：``main`` 是主依赖，其它值取全部 extra 的并集。"""
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    if group == "main":
+        return {_normalize(dep) for dep in data["project"]["dependencies"]}
+    return {
+        _normalize(dep) for deps in data["project"].get("optional-dependencies", {}).values() for dep in deps
+    }
+
+
+def _closure(roots: set[str]) -> set[str]:
+    """在 ``uv.lock`` 的依赖图上求传递闭包。
+
+    必须算闭包而不是只看直接声明：``starlette`` 是 fastapi 的传递依赖，
+    没直接写进 pyproject 也是装得上的 —— 只看直接声明会误报。
+    """
+    data = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+    graph: dict[str, set[str]] = {}
+    for package in data.get("package", []):
+        deps = {_normalize(dep["name"]) for dep in package.get("dependencies", [])}
+        # 包自身的 optional-dependencies 也算进来（宁可宽松，不要误报）
+        for group in (package.get("optional-dependencies") or {}).values():
+            deps |= {_normalize(dep["name"]) for dep in group}
+        graph.setdefault(_normalize(package["name"]), set()).update(deps)
+
+    seen: set[str] = set()
+    stack = list(roots)
+    while stack:
+        name = stack.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        stack.extend(graph.get(name, ()))
+    return seen
+
+
+def _runtime_distributions() -> set[str]:
+    """``uv sync --no-dev`` 之后镜像里**实际会有**的发行包。"""
+    return _closure(_root_dependencies("main"))
+
+
+def _imported_top_level_modules() -> set[str]:
+    """静态扫出 ``app/`` 里所有顶层导入的第三方模块名。"""
+    import ast
+    import sys
+
+    first_party = {"app"}
+    stdlib = set(sys.stdlib_module_names)
+    found: set[str] = set()
+
+    for path in sorted((ROOT / "app").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                # level > 0 是相对导入（本包内），跳过
+                names = [node.module or ""] if node.level == 0 else []
+            else:
+                continue
+            for name in names:
+                top = name.split(".")[0]
+                if top and top not in stdlib and top not in first_party:
+                    found.add(top)
+    return found
+
+
+def test_app_imports_are_declared_as_runtime_dependencies() -> None:
+    """``app/`` 里导入的第三方包必须能在主依赖（含传递依赖）里找到。
+
+    为什么需要这条：``app/infrastructure/llm/ark.py`` 顶层 ``import httpx``，
+    而 httpx 一度只写在 dev 依赖组里。开发机 `uv sync` 装了 dev 组所以一切正常，
+    镜像里（``--no-dev``）**没有 HTTP 客户端** —— 容器起来直接
+    `ModuleNotFoundError: No module named 'httpx'`，「能调模型」这个核心能力没了。
+
+    这类问题本地测不出来（测试跑在开发环境），只能靠构建+运行镜像 ——
+    除非有这条静态检查。
+    """
+    runtime = _runtime_distributions()
+    optional = _closure(_root_dependencies("extras"))
+    missing: dict[str, str] = {}
+
+    for module in sorted(_imported_top_level_modules()):
+        if module in _OPTIONAL_BY_DESIGN:
+            # 可选的也必须是「装得上」的，否则 extra 写错了同样发现不了
+            assert module in optional, (
+                f"{module} 被列为「刻意可选」，但主依赖与 extra 的闭包里都没有它："
+                "镜像里根本装不上，等于这个降级分支永远不会被启用"
+            )
+            continue
+        distribution = _normalize(_IMPORT_TO_DISTRIBUTION.get(module, module))
+        if distribution not in runtime:
+            missing[module] = distribution
+
+    assert not missing, (
+        "app/ 里导入了、但镜像（uv sync --no-dev）里不会有的包："
+        f"{missing}。要么加进 [project] dependencies，要么装进 extra 并在代码里"
+        "延迟导入 + 提供降级分支后加入 _OPTIONAL_BY_DESIGN。"
+    )
+
+
+def test_optional_by_design_list_has_no_stale_entries() -> None:
+    """豁免名单必须保持精简 —— 只写不删会慢慢变成「什么都放过」。"""
+    imported = _imported_top_level_modules()
+    stale = {module for module in _OPTIONAL_BY_DESIGN if module not in imported}
+    assert not stale, f"_OPTIONAL_BY_DESIGN 里的 {sorted(stale)} 已经用不到了，删掉"
