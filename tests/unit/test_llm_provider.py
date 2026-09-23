@@ -10,8 +10,10 @@ import pytest
 from app.common.exceptions import ProviderError, ValidationError
 from app.config.settings import DEFAULT_JWT_SECRET, Settings
 from app.infrastructure.llm import (
+    LLMBadRequestError,
     LLMCredentialError,
     LLMMessage,
+    LLMRateLimitError,
     LLMRequest,
     LLMTimeoutError,
     LLMTransportError,
@@ -155,6 +157,57 @@ async def test_retry_does_not_retry_credential_errors() -> None:
         await provider.complete(_request())
 
     assert sleeps == []
+
+
+async def test_retry_does_not_retry_timeouts() -> None:
+    """**T7 验收项：超时不再重试。**
+
+    超时和网络抖动不是一回事：抖动是随机的，重试有意义；超时说明 provider
+    正在处理或排队，立刻重试等于再压一份负载、大概率再超时。容器里实测过
+    反面教材：Developer 的长推理请求被连压 3 次（max_retries=2 实为共试 3 次），
+    每次静默等满 180s，合计白等 540s 才对外 504。
+
+    现在超时一次都不重试 —— 最坏等待 540s → 180s，快速失败，
+    由调用方决定什么时候再试。
+    """
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    inner = _FlakyProvider(script=[LLMTimeoutError("推理期静默超过读超时")])
+    provider = RetryingLLMProvider(inner, max_retries=3, sleep=fake_sleep)
+
+    with pytest.raises(LLMTimeoutError):
+        await provider.complete(_request())
+
+    # 三个断言缺一不可：没有退避等待、只消耗了脚本里那一条（= 只调用了 1 次）、
+    # 抛的确实是超时本身而不是脚本耗尽错误
+    assert sleeps == []
+    assert inner.remaining == 0
+
+
+async def test_timeout_retry_policy_is_explicit_per_error_class() -> None:
+    """重试策略表：哪些错误重试必须是**显式决定**，不能靠继承默认值漂移。
+
+    ``retry.py`` 用 ``getattr(exc, "retryable", False)`` 取标记 —— 没写的类
+    默认不重试（宁可少重试，也不要对未知错误白等）。这张表把每个 LLM 错误
+    类的选择锁死：将来新增错误类型时漏写 ``retryable``，测试会指出它落在
+    「未知」一侧，逼着作者显式表态。
+    """
+    from app.infrastructure.llm import errors as llm_errors
+
+    explicit = {
+        LLMTransportError: True,  # 连接抖动 / 5xx：随机的，重试有意义
+        LLMRateLimitError: True,  # 429：退避后重试是标准做法
+        LLMTimeoutError: False,  # 见 test_retry_does_not_retry_timeouts
+        LLMCredentialError: False,  # 401/403：重试一万次也一样
+        LLMBadRequestError: False,  # 400：请求本身有问题
+    }
+    for cls, expected in explicit.items():
+        assert cls.retryable is expected, f"{cls.__name__}.retryable 应为 {expected} —— 重试策略被意外改动了"
+    # 未知错误（没写 retryable 的）一律不重试：这是 retry.py 的默认，不是巧合
+    assert not getattr(llm_errors.ProviderError, "retryable", False)
 
 
 async def test_retry_gives_up_after_max_retries_and_uses_exponential_backoff() -> None:
