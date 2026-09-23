@@ -19,10 +19,14 @@ name: CI
 on:
   push:
   pull_request:
+  # nightly 跑整栈冒烟（smoke-stack job）：其余 job 对 schedule 不响应
+  schedule:
+    - cron: "0 22 * * *" # UTC 22:00 = 北京时间每天 6:00
   workflow_dispatch:
 
 jobs:
   lint-and-unit:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -127,3 +131,57 @@ jobs:
 
       - name: Import app.main in the image-equivalent environment
         run: uv run --no-sync python -c "import app.main; print('app.main imports ok')"
+
+  smoke-stack:
+    # T5：整栈冒烟**不进每个 PR** —— 构建重、时间长；
+    # main push（含合并）+ nightly + 手动触发
+    if: >-
+      github.event_name == 'schedule'
+      || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Generate a minimal .env (mock provider, random secrets)
+        # 值不回显；APP_ENV=dev 才允许 mock provider（prod 护栏会拒绝）
+        run: |
+          uv run python - <<'PY'
+          import secrets
+          from pathlib import Path
+
+          block = "\n".join(
+              [
+                  "APP_ENV=dev",
+                  "LLM_PROVIDER=mock",
+                  "LLM_API_KEY=ci-dummy-key",
+                  "LLM_MODEL=ci-dummy-model",
+                  "JWT_SECRET_KEY=" + secrets.token_urlsafe(48),
+                  "MYSQL_PASSWORD=" + secrets.token_urlsafe(18),
+                  "MYSQL_ROOT_PASSWORD=" + secrets.token_urlsafe(18),
+                  "",
+              ]
+          )
+          Path(".env").write_text(block + "\n", encoding="utf-8")
+          print(".env generated (values not echoed)")
+          PY
+
+      - name: Build and start the full stack
+        run: docker compose up -d --build
+
+      - name: Run smoke checks
+        run: uv run python scripts/smoke_stack.py --skip-build
+
+      - name: Show app logs on failure
+        if: failure()
+        run: docker compose logs app --tail 200
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v --remove-orphans

@@ -923,6 +923,19 @@ docker compose up -d --build  # app(4 worker) + MySQL 8 + Redis
 # 打开 http://<主机>:8000/ui/
 ```
 
+### 部署验收不用背清单：跑冒烟脚本
+
+```bash
+python scripts/smoke_stack.py             # 起栈 → 10 项检查 → 拆栈（退出码非 0 即失败）
+python scripts/smoke_stack.py --keep      # 检查完保留栈，方便排查
+```
+
+10 项检查对应部署时**真正踩过的坑**：`events=redis`（redis extra 未装会静默退化）、
+日志无 MySQL 密码明文、表数 == 模型表数 + alembic_version、`/health` 与 `/ui/`、
+注册 → 登录 → 项目 → 需求 → 工作流（含幂等重放）。CI 的 `smoke-stack` job
+（main push + 每日夜间）跑的就是它；「EXTRAS 漏掉 redis」注入时只有这一条检查变红
+—— 其余全部照常通过，这正是静默退化的可怕之处，也是它必须被断言的原因。
+
 镜像做了三件事：多阶段构建（uv 只在 builder 阶段）、非 root 运行、
 `tests/` 与 `.env` 都不进镜像（`.dockerignore`）。
 
