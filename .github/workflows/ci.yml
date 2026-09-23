@@ -176,11 +176,32 @@ jobs:
         run: docker compose up -d --build
 
       - name: Run smoke checks
-        run: uv run python scripts/smoke_stack.py --skip-build
+        # 输出同时进 job summary：CI 日志需要管理员权限才能拉，
+        # summary 通过 check-runs API 匿名可读 —— 远程诊断靠它
+        run: |
+          uv run python scripts/smoke_stack.py --skip-build 2>&1 | tee /tmp/smoke.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Smoke output -> job summary
+        if: always()
+        run: |
+          {
+            echo "## Smoke output"
+            echo '```'
+            cat /tmp/smoke.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Show app logs on failure
         if: failure()
-        run: docker compose logs app --tail 200
+        run: |
+          {
+            echo "## app logs (tail 200)"
+            echo '```'
+            docker compose logs app --tail 200
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          docker compose logs app --tail 60
 
       - name: Tear down
         if: always()
