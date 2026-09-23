@@ -851,6 +851,43 @@ docker compose up -d --build  # app(4 worker) + MySQL 8 + Redis
 镜像做了三件事：多阶段构建（uv 只在 builder 阶段）、非 root 运行、
 `tests/` 与 `.env` 都不进镜像（`.dockerignore`）。
 
+### 拉不到 Docker Hub 时怎么办（国内网络）
+
+`docker compose up --build` 很可能第一步就卡在
+`failed to resolve reference ... registry-1.docker.io`。**不用改 compose**：
+从可用镜像源拉下来、打上**官方同名 tag** 即可 —— compose 的默认
+`pull_policy: missing` 会直接用本地镜像，不会再去联网。
+
+```bash
+# 1) 先探哪个源可用（2026-09-23 本机实测：daocloud / 1panel 可用，1ms.run / rat.dev 不通）
+for m in docker.m.daocloud.io docker.1panel.live docker.1ms.run hub.rat.dev; do
+  printf '%-24s ' "$m"
+  docker manifest inspect "$m/library/mysql:8.4" >/dev/null 2>&1 && echo OK || echo FAIL
+done
+
+# 2) 用可用的源拉取，再打官方同名 tag
+docker pull docker.m.daocloud.io/library/mysql:8.4
+docker tag  docker.m.daocloud.io/library/mysql:8.4 mysql:8.4
+docker pull docker.m.daocloud.io/library/redis:7-alpine
+docker tag  docker.m.daocloud.io/library/redis:7-alpine redis:7-alpine
+# 构建应用镜像还需要基础镜像
+docker pull docker.m.daocloud.io/library/python:3.12-slim
+docker tag  docker.m.daocloud.io/library/python:3.12-slim python:3.12-slim
+```
+
+两个容易忽略的点：
+
+- **别改 compose 里的镜像名。** 改了本地能跑，但换到能正常联网的机器/CI 上反而要改回来。
+  打同名 tag 才是「本地兜底、配置不动」的解法。
+- **不是所有源都一起挂。** 本机实测 `registry-1.docker.io` 不通，但 `ghcr.io` 通 ——
+  所以 Dockerfile 里 `COPY --from=ghcr.io/astral-sh/uv:latest` 不受影响，
+  只有 `python:3.12-slim`（Docker Hub）需要走上面这步。遇到网络问题时，
+  先分别探一探 Docker Hub / ghcr.io / quay.io，别默认「全都不通」。
+
+连镜像源都不可用时的退路，是在本地已有镜像里找同族底座、把源码下载到**宿主机**
+再 `COPY` 进去自行构建（容器内网络常与宿主机不同，别在容器里 `git clone`）——
+这属于应急手段，维护成本高，能拉到就别自建。
+
 ### 多人部署必须换掉的两样东西
 
 | 本地 | 多人 | 为什么 |
