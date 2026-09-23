@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>AI Dev Team · AI 软件开发团队协作平台</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%2322d3ee'/><text x='16' y='22' font-size='16' font-family='monospace' font-weight='bold' text-anchor='middle' fill='%23041219'>AI</text></svg>" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <!-- 深空背景光晕 -->
+  <div class="bg-glow bg-glow--one" aria-hidden="true"></div>
+  <div class="bg-glow bg-glow--two" aria-hidden="true"></div>
+
+  <!-- 全部界面由 app.js 渲染：状态驱动，避免模板碎片散落在两处 -->
+  <div id="app"></div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <script src="./app.js"></script>
+</body>
+</html>
