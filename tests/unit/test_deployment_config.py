@@ -231,3 +231,23 @@ def test_optional_by_design_list_has_no_stale_entries() -> None:
     imported = _imported_top_level_modules()
     stale = {module for module in _OPTIONAL_BY_DESIGN if module not in imported}
     assert not stale, f"_OPTIONAL_BY_DESIGN 里的 {sorted(stale)} 已经用不到了，删掉"
+
+
+def test_pytest_is_a_runtime_dependency() -> None:
+    """pytest 必须在运行时闭包里 —— 它不是开发工具，是 L3 工具的执行引擎。
+
+    L3 ``run_pytest`` 用 ``sys.executable -m pytest`` 执行**模型写的测试代码**。
+    pytest 放在 dev 组时，镜像（``--no-dev``）里没有它，测试执行只会得到
+    ``No module named pytest``：Tester 如实判 fail、Reviewer 如实打回，
+    而**模型改自己的代码永远修不好环境缺包** —— 返工循环走不出去
+    （2026-09-23 容器内实测：同一需求连打 5 轮 needs_revision）。
+
+    上一条 import 检查抓不到这个：``app/`` 从不 ``import pytest``，
+    它是**子进程调用** —— 所以单独立一条。
+    """
+    runtime = _runtime_distributions()
+    assert "pytest" in runtime, (
+        "pytest 不在运行时依赖闭包里：L3 run_pytest 在镜像里会报 "
+        "'No module named pytest'，真实测试执行功能失效。"
+        "它必须放在 [project] dependencies（不是 dev 组、也不是 extra）。"
+    )

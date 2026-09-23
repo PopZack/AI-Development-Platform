@@ -20,6 +20,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pyjwt" },
+    { name = "pytest" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -35,7 +36,6 @@ redis = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
 ]
@@ -53,6 +53,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.9.0" },
     { name = "pydantic-settings", specifier = ">=2.6.0" },
     { name = "pyjwt", specifier = ">=2.9.0" },
+    { name = "pytest", specifier = ">=8.3.0" },
     { name = "redis", marker = "extra == 'redis'", specifier = ">=8.1.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
@@ -61,7 +62,6 @@ provides-extras = ["mysql", "redis"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "pytest", specifier = ">=8.3.0" },
     { name = "pytest-asyncio", specifier = ">=0.24.0" },
     { name = "ruff", specifier = ">=0.7.0" },
 ]

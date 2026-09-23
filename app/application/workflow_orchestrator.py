@@ -471,6 +471,12 @@ class WorkflowOrchestrator:
                     prd=dict(requirement.prd_json or {}),
                     architecture=dict(architecture.content_json) if architecture else {},
                     written_files=written,
+                    # ⚠️ 必须传真实执行结果。漏传时 Prompt 会渲染成
+                    # 「本次没有真实执行测试」，Tester 如实照做判 fail ——
+                    # 而 pytest 明明跑过了（2026-09-23 容器内实测发生过：
+                    # 12 passed 的结果被丢弃，凭空多出一轮返工）。
+                    # 单测只覆盖 Prompt 构造函数本身，盖不住这根线。
+                    execution=self._last_execution,
                 ),
                 context=AgentContext(requirement_id=run.requirement_id),
             ),

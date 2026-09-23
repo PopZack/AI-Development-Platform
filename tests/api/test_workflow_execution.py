@@ -190,6 +190,18 @@ async def test_full_loop_pauses_for_patch_approval_then_completes(
     assert execution["no_tests_collected"] is True
     assert execution["exit_code"] == 5
 
+    # ⚠️ 回归守卫：执行结果必须**进 Tester 的 Prompt**，不只是落进交付物。
+    # 这里曾断过一根线：编排器调 build_tester_user_prompt 时漏传 execution=，
+    # 于是 pytest 明明跑了、Prompt 里却是「本次没有真实执行测试」——
+    # Tester 如实照做判 fail，凭空多出一轮返工（真实容器环境发生过）。
+    # 交付物断言（上面两行）与 Prompt 断言必须同时存在，二者盖的是不同的线。
+    tester_call = provider.calls[3]  # 0=PRD 1=架构 2=Developer 3=Tester 4=Reviewer
+    tester_prompt = tester_call.messages[-1].content
+    assert "没有收集到任何测试" in tester_prompt, (
+        "Tester 的 Prompt 里没有真实执行结果 —— 编排器漏传 execution= 了"
+    )
+    assert "本次没有真实执行测试" not in tester_prompt
+
     # 最终批准 → COMPLETED
     done = await client.post(f"{API}/runs/{run['id']}/approve", headers=owner["headers"])
     assert done.status_code == 200, done.text

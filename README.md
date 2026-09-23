@@ -297,12 +297,18 @@ Ark 的 `/api/v3/chat/completions` 本身就是 OpenAI 兼容协议。
 
 | | 传输层重试（`retry.py`） | 内容层重试（Stage 3 Agent Runtime） |
 |---|---|---|
-| 触发 | 超时、网络抖动、5xx、429 | 模型回的内容不是合法 JSON / 不合 Schema |
+| 触发 | 网络抖动、连接被重置、5xx、429 | 模型回的内容不是合法 JSON / 不合 Schema |
 | 谁管 | 重试装饰器 | Agent Runtime |
 
 混成一个「最多重试 N 次」会很糟：模型稳定地回错误 JSON 时传输层白等三轮退避，
 而网络抖动时内容层又跑去重写 Prompt。**401 / 403 / 400 一次都不重试** ——
 它们重试一万次也一样失败，只会把真正的配置问题埋进重试日志里。
+
+**超时也一次都不重试**（2026-09-23 改的）。它和抖动是两件事：抖动是随机的，
+重试有意义；超时说明 provider 正在推理或排队，立刻重试等于**再压一份同样的负载**，
+而且大概率再超一次。实测代价是 `max_retries=2`（= 共试 3 次）让一个注定失败的
+Developer 请求白等 **540s** 才报错；改判之后最坏等待是 180s，快速失败，
+由调用方决定要不要挑更好的时机重来。
 
 ### ⚠️ 火山方舟：三条路径，配错的表现是 401
 
@@ -619,6 +625,17 @@ L4 工具被 Gateway 拦下时，**审批记录是自动创建的**（`PENDING`�
   判不出「测试写错了、根本没收集到用例」这类问题
 - 「模型说通过」和「pytest 真的通过」是两件事，所以测试交付物里
   既存模型的结论，也存 `execution`（exit code / 是否超时 / 输出尾部）
+- ⚠️ **pytest 是运行时依赖**（写在 `[project] dependencies`，不是 dev 组）——
+  L3 用 `sys.executable -m pytest` 执行模型写的测试，放在 dev 组时镜像里
+  （`--no-dev`）没有它，执行只报 `No module named pytest`。容器里实测过这个
+  场景：Tester 如实判 fail、Reviewer 如实打回，而**模型改自己的代码永远
+  修不好环境缺包**，返工循环走不出去（同一个需求连打 5 轮 needs_revision）。
+  `app/` 从不 `import pytest`（它是子进程调用），所以 import 完整性检查
+  抓不到 —— 有专门的守卫用例 `test_pytest_is_a_runtime_dependency`
+- 同理，编排器**必须把执行结果传进 Tester 的 Prompt**。这里也断过线：
+  pytest 跑出 `12 passed`，Prompt 里却是「本次没有真实执行测试」的占位块，
+  Tester 如实照做判 fail。守卫是全流程测试里对 Mock Provider 收到的
+  Prompt 直接断言（`provider.calls[3]`），与交付物断言各盖一根线
 
 安全边界（这是本项目唯一会**执行模型写的代码**的地方）：
 
@@ -1014,35 +1031,58 @@ RuntimeError: 'cryptography' package is required for sha256_password or caching_
 
 ### 一次同步请求可能长达几分钟，反向代理的超时要跟着调
 
-`start` / `resume` 是**同步**接口 —— 它们真的在请求里等模型返回。实测（2026-09-23，容器内）：
+`start` / `resume` 是**同步**接口 —— 它们真的在请求里等模型返回。实测（2026-09-23，真端点）：
 
-| 角色 | 输出规模 | 实测耗时 |
-|---|---|---|
-| PRODUCT | ~3~8k tokens | 40~116s |
-| ARCHITECT | ~3.5~8.6k tokens | 25~59s |
-| **DEVELOPER** | **~21k tokens**（要给出整份文件内容） | **323s（成功的那次）** |
+| 角色 | prompt | completion | 实测耗时 |
+|---|---|---|---|
+| PRODUCT | 0.7~0.8k | 2~7.3k | 40~116s |
+| ARCHITECT | 1.4~1.6k | 2.1~7.0k | 25~59s |
+| **DEVELOPER** | 3.0k | **18.4k**（要给出整份文件内容） | **323s** |
 
-`LLM_TIMEOUT_SECONDS` 默认 180s，而 httpx 的 timeout 是**读超时**（两个数据块之间），
-不是整请求总时长 —— 所以 323s 的调用能成功，但**只要中途静默超过 180s 就会读超时**。
-Developer 正好长期贴在这条边界上，而且一次重试等于把那 21k tokens 从头再生成一遍：
+⚠️ **`completion_tokens` 不等于「输出规模」。** Developer 那次写了 18,440 个 completion
+token，而落库的 `output_json` 只有 3,976 字符（≈1.1k token）—— 差额是**模型内部的推理
+token**（这个端点会下发 `reasoning_content`）。拿 completion 去判「输出太长」会得出反向结论，
+我实际就这么误判过一次。
 
-```
-llm call failed, retrying | provider=ark code=TIMEOUT attempt=1/2
-llm call failed, retrying | provider=ark code=TIMEOUT attempt=2/2
-workflow run failed | phase_step=DEVELOPER_AGENT code=TIMEOUT   ← 对外 504
-```
+**所以请求必须是流式的** —— `ark.py` 里的 `stream: True` 是硬要求，不是性能优化：
 
-三个直接后果：
+- httpx 的 timeout 是**读超时**（两个数据块之间的最大间隔），不是整请求总时长；
+- 非流式下「服务端把整包算完才发第一个字节」→ 读超时退化成总时长上限，
+  而推理期实测可以到 300s+ → **必然超时**；重试只是把同样的长请求再压一遍
+  （`max_retries=2` 的含义是**共试 3 次**，实测白等 540s）；
+- 流式下块间隔是亚秒级（探针实测块间最大 **0.8s**、首字节 **1.0s**），同一个 timeout 值
+  含义完全不同；顺带把代理的超时问题也解了 —— `proxy_read_timeout` 同样是「无数据超时」，
+  数据持续流动就不会触发。
 
-1. **nginx / 网关的 `proxy_read_timeout` 必须调大**（默认 60s 会在第 60 秒给用户一个 502，
-   而服务端还在老实等模型）。SSE 那条路径还要关掉 `proxy_buffering`，否则事件会被攒着不发。
+超时也**不再重试**（它和网络抖动不是一回事，见 `errors.py` 的说明），
+所以最坏等待是 180s 而不是 540s。
+
+另两条仍然成立：
+
+1. **SSE 那条路径要关掉 `proxy_buffering`**，否则事件会被攒着不发。
 2. **超时不是静默失败**：工作流变成 `FAILED` + `error_code=TIMEOUT`，
    `error_message` 写明是 provider 超时，需求状态留在上一步（不会停在半路），
    客户端拿到 504。排障先看 `GET /runs/{id}`，不要只看 HTTP 码 —— 504 有好几种来源。
-3. **模型变慢时最坏要等很久**（2 次尝试 × 超时 + 退避）。当前可调的旋钮：
-   `LLM_TIMEOUT_SECONDS`（放宽单次等待）、`LLM_MAX_RETRIES`（少重试、快速失败）。
-   更根本的方向是压低 Developer 的输出体量 —— 它现在会把整份文件内容写进 JSON，
-   这是单次调用里最大的一块。
+
+#### 端点行为用探针量，别推断
+
+```bash
+uv run python scripts/probe_llm_endpoint.py          # 五个探针，1~5 分钟
+uv run python scripts/probe_llm_endpoint.py --full   # 用真实业务规模的长请求
+```
+
+它专量四件「推断容易错」的事。2026-09-23 对本项目端点的实测结果：
+
+| 量什么 | 实测 | 意味着 |
+|---|---|---|
+| 流式可用性、块间隔 | 首字节 1.0s、块间最大 0.8s | 长静默超时靠流式根治 |
+| `max_tokens` 是否生效 | **不生效**（要 60，实得 1426） | 代码里任何输出上限都是**假保证** |
+| `max_completion_tokens` | 生效，但**不能当护栏**（要 60 实得 60，内容 0 字符） | 它把推理也算进预算，额度给低了回答直接变空串 |
+| `response_format` 与流式共存 | 可用 | 改流式不会丢 `json_mode` |
+
+因此 Agent 的 `max_tokens` **刻意不再下发**（理由写在 `app/agent/roles.py` 的注释里）：
+它今天被忽略，哪天被遵守就会把长输出硬切掉 —— 那是个地雷。
+成本护栏改用可观测性：`agent_runs` 已经记了 prompt/completion/total tokens 与实际耗时。
 
 ### 关于「执行模型写的代码」
 
