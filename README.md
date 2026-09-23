@@ -885,6 +885,22 @@ docker compose up -d --build  # app(4 worker) + MySQL 8 + Redis
 镜像做了三件事：多阶段构建（uv 只在 builder 阶段）、非 root 运行、
 `tests/` 与 `.env` 都不进镜像（`.dockerignore`）。
 
+**实测结论**（2026-09-23，Docker Desktop 29.7.2，真 MySQL 8.4 + Redis 7）：
+
+```
+db / redis                        healthy
+app                               Up (healthy)，4 个 worker 各自启动
+启动日志                           env=prod | db=mysql+aiomysql://***@db:3306/aidev
+                                  | llm_provider=ark | events=redis
+alembic upgrade head              容器启动命令里先跑 → 9 张表建好
+/health、/ui/                     200
+注册/登录/项目/需求/创建工作流      全部正常
+容器内真实模型调用                 可用（PRODUCT / ARCHITECT 均成功返回）
+```
+
+`events=redis` 这一行值得每次确认：它说明 `redis` 包真的装上了、限流与事件广播
+走的是跨进程的 Redis 而不是进程内字典。**看到 `in-process` 就是部署没到位。**
+
 ### 拉不到 Docker Hub 时怎么办（国内网络）
 
 `docker compose up --build` 很可能第一步就卡在
@@ -959,9 +975,31 @@ RuntimeError: 'cryptography' package is required for sha256_password or caching_
 `AUTO_CREATE_TABLES=false`（compose 里已设）+ 启动命令先跑 `alembic upgrade head`。
 原因见「数据库迁移与跨方言」小节：`create_all` 不给已有表加列，发版时会静默失效。
 
+### 镜像构建实测：两个只在构建/运行镜像时才会暴露的坑
+
+一次真实的 `docker compose up -d --build` 抓出来的，记在这里省得再走一遍：
+
+1. **不要在 runtime 阶段 `apt-get install`。** 原来为了健康检查装 `curl`，
+   而这一层在国内网络下经常直接失败：
+   `Failed to fetch http://deb.debian.org/debian/dists/trixie/main/binary-amd64/Packages 404`，
+   整个构建卡死在这里。**镜像里本来就有 Python** —— 健康检查改用 `urllib`
+   就够了，省掉整个 apt 层（镜像更小、构建不依赖 Debian 源）。
+2. **`uv sync --no-dev` 只装主依赖，所以「导入写了、依赖放在 dev 组」会让镜像启动即崩。**
+   构建成功、容器起来后立刻
+   `ModuleNotFoundError: No module named 'httpx'` —— 而 `app/infrastructure/llm/ark.py`
+   顶层就 import 它，等于「能调模型」这个核心能力在部署时直接没了。
+   开发机上 `uv sync` 带 dev 组，所以完全看不出来。
+   修法是把 `httpx` 放进主依赖；`tests/unit/test_deployment_config.py` 里加了一条静态检查
+   （扫 `app/` 的所有顶层导入，逐个对照 `uv.lock` 里主依赖的**传递闭包**），
+   以后再加依赖漏了会当场报错。
+
 ### 上线前的检查清单
 
-- [ ] `JWT_SECRET_KEY` 换成真随机值（≥ 32 字节）。`APP_ENV=prod` 时配置层会拒绝默认值
+- [ ] `JWT_SECRET_KEY` 换成真随机值（≥ 32 字节）。`APP_ENV=prod` 时配置层会拒绝默认值 ——
+      **这条是真拦过人的**：`.env` 里留着默认占位值时，容器会起来又立刻崩，日志刷
+      `ValidationError: JWT_SECRET_KEY is still the default value`
+- [ ] `DEBUG=false`。开着会把根 logger 降到 DEBUG，httpx / sqlalchemy 的内部细节
+      灌满日志流，业务日志被淹没
 - [ ] `LLM_PROVIDER` 不是 `mock`（prod 下配置层直接拒绝启动）
 - [ ] `LLM_API_KEY` / `LLM_MODEL` 与 `LLM_BASE_URL` 是**同一套**（方舟的三条路径不能混用）
 - [ ] 反向代理后打开 `RATE_LIMIT_TRUST_PROXY=true`，**且代理确实会重写 `X-Forwarded-For`**
@@ -969,6 +1007,42 @@ RuntimeError: 'cryptography' package is required for sha256_password or caching_
 - [ ] `WORKSPACE_ROOT` 落在持久卷上（容器重建不该丢 Agent 写的代码）
 - [ ] 挂 HTTPS：令牌走 `Authorization` 头，明文 HTTP 等于把令牌公开
 - [ ] 备份 `mysql_data` 卷与 `workspace` 卷
+
+另外：启动日志里的连接串是**脱敏过**的（`mysql+aiomysql://***@db:3306/aidev`）。
+别改成打原串 —— 日志会被采集、转发、长期保存，多 worker 下每个 worker 各打一遍，
+等于把库密码公布出去。`tests/unit/test_security.py` 有一条静态检查守着这件事。
+
+### 一次同步请求可能长达几分钟，反向代理的超时要跟着调
+
+`start` / `resume` 是**同步**接口 —— 它们真的在请求里等模型返回。实测（2026-09-23，容器内）：
+
+| 角色 | 输出规模 | 实测耗时 |
+|---|---|---|
+| PRODUCT | ~3~8k tokens | 40~116s |
+| ARCHITECT | ~3.5~8.6k tokens | 25~59s |
+| **DEVELOPER** | **~21k tokens**（要给出整份文件内容） | **323s（成功的那次）** |
+
+`LLM_TIMEOUT_SECONDS` 默认 180s，而 httpx 的 timeout 是**读超时**（两个数据块之间），
+不是整请求总时长 —— 所以 323s 的调用能成功，但**只要中途静默超过 180s 就会读超时**。
+Developer 正好长期贴在这条边界上，而且一次重试等于把那 21k tokens 从头再生成一遍：
+
+```
+llm call failed, retrying | provider=ark code=TIMEOUT attempt=1/2
+llm call failed, retrying | provider=ark code=TIMEOUT attempt=2/2
+workflow run failed | phase_step=DEVELOPER_AGENT code=TIMEOUT   ← 对外 504
+```
+
+三个直接后果：
+
+1. **nginx / 网关的 `proxy_read_timeout` 必须调大**（默认 60s 会在第 60 秒给用户一个 502，
+   而服务端还在老实等模型）。SSE 那条路径还要关掉 `proxy_buffering`，否则事件会被攒着不发。
+2. **超时不是静默失败**：工作流变成 `FAILED` + `error_code=TIMEOUT`，
+   `error_message` 写明是 provider 超时，需求状态留在上一步（不会停在半路），
+   客户端拿到 504。排障先看 `GET /runs/{id}`，不要只看 HTTP 码 —— 504 有好几种来源。
+3. **模型变慢时最坏要等很久**（2 次尝试 × 超时 + 退避）。当前可调的旋钮：
+   `LLM_TIMEOUT_SECONDS`（放宽单次等待）、`LLM_MAX_RETRIES`（少重试、快速失败）。
+   更根本的方向是压低 Developer 的输出体量 —— 它现在会把整份文件内容写进 JSON，
+   这是单次调用里最大的一块。
 
 ### 关于「执行模型写的代码」
 
