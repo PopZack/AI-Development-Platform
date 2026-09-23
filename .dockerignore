@@ -23,8 +23,10 @@ shots/
 .env.*
 !.env.example
 
-# 开发期文件
+# 开发期文件（生产不需要）
 tests/
+evals/
+scripts/
 design_docs/
 README.md
 

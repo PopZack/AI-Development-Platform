@@ -1,0 +1,443 @@
+{
+  "version": 1,
+  "note": "Agent 评估集。用例成对出现「正确实现」与「有缺陷实现」——只测好样本的话，一个永远说没问题的模型也能拿满分。",
+  "cases": [
+    {
+      "id": "prd-todo-api",
+      "agent": "product",
+      "kind": "quality",
+      "title": "一句话需求 → 可判定的 PRD",
+      "input": {
+        "title": "实现待办事项接口",
+        "description": "用 FastAPI 实现待办事项的增删改查，支持标记完成与分页查询；同一用户下标题不能重复。",
+        "priority": "P0",
+        "acceptance_criteria": []
+      },
+      "assertions": [
+        {
+          "type": "min_items",
+          "path": "acceptance_criteria",
+          "value": 3,
+          "message": "验收标准条数"
+        },
+        {
+          "type": "items_contain_any",
+          "path": "acceptance_criteria",
+          "any": [
+            "返回",
+            "HTTP",
+            "状态码",
+            "/",
+            "字段",
+            "抛"
+          ],
+          "message": "验收标准可验证"
+        },
+        {
+          "type": "items_match_none",
+          "path": "acceptance_criteria",
+          "none": [
+            "要保证.{0,6}(一致性|正确性|稳定性|质量)",
+            "用户体验(良好|流畅|友好)",
+            "性能(良好|优秀|足够)",
+            "尽量"
+          ],
+          "message": "验收标准无空话"
+        },
+        {
+          "type": "not_empty",
+          "path": "out_of_scope",
+          "message": "明确范围外"
+        }
+      ],
+      "mock_output": {
+        "title": "实现待办事项接口",
+        "summary": "提供待办的增删改查、完成标记与分页。",
+        "goals": [
+          "支持创建待办"
+        ],
+        "user_stories": [
+          "作为用户，我希望创建待办，以便记录要做的事"
+        ],
+        "acceptance_criteria": [
+          "POST /api/todos 成功时返回 201，响应体包含 id 与 title 字段",
+          "同一 user_id 下已存在相同 title 时，POST 返回 409 且不创建新记录",
+          "PATCH /api/todos/{id} 将 completed 置为 true 后，GET /api/todos 返回该记录 completed=true",
+          "GET /api/todos?page=1&size=20 返回 items 与 total 字段"
+        ],
+        "out_of_scope": [
+          "团队协作与权限共享",
+          "待办提醒推送"
+        ],
+        "open_questions": []
+      },
+      "mock_bad_output": {
+        "title": "实现待办事项接口",
+        "summary": "提供待办接口。",
+        "goals": [],
+        "user_stories": [],
+        "acceptance_criteria": [
+          "要保证数据一致性",
+          "实现待办功能"
+        ],
+        "out_of_scope": [],
+        "open_questions": []
+      },
+      "mock_bad_reason": "验收标准是空话且条数不足、范围外为空"
+    },
+    {
+      "id": "review-missing-uniqueness-check",
+      "agent": "reviewer",
+      "kind": "defect_detection",
+      "title": "审查必须发现「缺少标题唯一性校验」（注入缺陷）",
+      "input": {
+        "prd": {
+          "title": "实现待办事项接口",
+          "summary": "提供待办的增删改查。",
+          "goals": [
+            "支持创建待办"
+          ],
+          "user_stories": [],
+          "acceptance_criteria": [
+            "POST /api/todos 成功时返回 201",
+            "同一 user_id 下已存在相同 title 时，POST 返回 409 且不创建新记录"
+          ],
+          "out_of_scope": [],
+          "open_questions": []
+        },
+        "architecture": {
+          "overview": "api → service → repository 三层；service 通过注入的 repository 做数据访问。",
+          "components": [
+            {
+              "name": "todo_service",
+              "responsibility": "业务规则校验（含标题唯一性）",
+              "depends_on": [
+                "todo_repository"
+              ]
+            },
+            {
+              "name": "todo_repository",
+              "responsibility": "数据读写",
+              "depends_on": []
+            }
+          ],
+          "data_model": [
+            "todos: id, user_id, title, completed；UNIQUE(user_id, title)"
+          ],
+          "api_endpoints": [
+            "POST /api/todos —— 创建待办"
+          ],
+          "key_decisions": [
+            "唯一性由 service 预校验 + 库级 UNIQUE 约束双保险；并发撞约束时转 409"
+          ],
+          "risks": [],
+          "test_strategy": [
+            "唯一性用集成测试覆盖，含并发场景"
+          ]
+        },
+        "patch_summary": "新增待办创建接口。",
+        "changes": [
+          {
+            "path": "app/todo_service.py",
+            "new_content": "class TodoService:\n    def __init__(self, session, repo):\n        self._session = session\n        self._repo = repo\n\n    async def create(self, user_id, title):\n        todo = Todo(user_id=user_id, title=title)\n        self._session.add(todo)\n        await self._session.commit()\n        return todo\n",
+            "reason": "实现创建"
+          }
+        ],
+        "diff": "--- a/app/todo_service.py\n+++ b/app/todo_service.py\n+    async def create(self, user_id, title):\n+        todo = Todo(user_id=user_id, title=title)\n+        self._session.add(todo)\n+        await self._session.commit()\n+        return todo\n",
+        "test_report": {
+          "verdict": "pass",
+          "summary": "静态核对通过。",
+          "cases": [
+            {
+              "name": "创建返回 201",
+              "expectation": "POST 返回 201",
+              "passed": true,
+              "detail": ""
+            }
+          ],
+          "risks": []
+        }
+      },
+      "expect": {
+        "verdict": "needs_revision"
+      },
+      "assertions": [
+        {
+          "type": "expected_value",
+          "path": "verdict",
+          "value": "needs_revision",
+          "message": "缺陷必须被打回"
+        },
+        {
+          "type": "findings_contain_any",
+          "path": "findings",
+          "any": [
+            "唯一",
+            "重复",
+            "duplicate",
+            "409",
+            "冲突"
+          ],
+          "message": "指出缺的是唯一性校验"
+        }
+      ],
+      "mock_output": {
+        "verdict": "needs_revision",
+        "summary": "实现缺少 PRD 与架构都要求的唯一性校验，验收标准无法达成。",
+        "findings": [
+          {
+            "severity": "blocker",
+            "file": "app/todo_service.py",
+            "comment": "PRD 要求「同一 user_id 下标题重复时返回 409」，架构的 key_decisions 也写了「service 预校验 + 库级 UNIQUE 双保险」，但 create 未做任何重复校验，会创建重复记录——验收标准第 2 条不达标"
+          }
+        ]
+      },
+      "mock_bad_output": {
+        "verdict": "approved",
+        "summary": "实现简洁，符合分层。",
+        "findings": [
+          {
+            "severity": "praise",
+            "file": "",
+            "comment": "代码结构清晰"
+          }
+        ]
+      },
+      "mock_bad_reason": "没做校验却放行——评估集必须能抓住这种漏检"
+    },
+    {
+      "id": "tester-unrunnable-suite",
+      "agent": "tester",
+      "kind": "defect_detection",
+      "title": "测试根本没收集到用例时，Tester 不能报 pass（真实踩过的假阴性）",
+      "input": {
+        "prd": {
+          "title": "实现 slugify",
+          "summary": "把文本转成 URL 友好的 slug。",
+          "goals": [
+            "支持 slugify"
+          ],
+          "user_stories": [],
+          "acceptance_criteria": [
+            "slugify('Hello World') 返回 hello-world",
+            "pytest 全部通过"
+          ],
+          "out_of_scope": [],
+          "open_questions": []
+        },
+        "architecture": {
+          "overview": "单个工具模块。",
+          "components": [
+            {
+              "name": "strutils",
+              "responsibility": "字符串处理",
+              "depends_on": []
+            }
+          ],
+          "data_model": [],
+          "api_endpoints": [],
+          "key_decisions": [
+            "纯函数，无 IO"
+          ],
+          "risks": [],
+          "test_strategy": [
+            "pytest 覆盖边界"
+          ]
+        },
+        "written_files": [
+          {
+            "path": "strutils.py",
+            "content": "import re\n\ndef slugify(text: str) -> str:\n    return re.sub(r'[^a-z0-9]+', '-', text.lower()).strip('-')\n"
+          }
+        ],
+        "execution": {
+          "command": "-m pytest -p no:cacheprovider -q",
+          "exit_code": 5,
+          "timed_out": false,
+          "truncated": false,
+          "passed": false,
+          "no_tests_collected": true,
+          "output_tail": "no tests ran in 0.01s\n"
+        }
+      },
+      "assertions": [
+        {
+          "type": "expected_value",
+          "path": "verdict",
+          "value": "fail",
+          "message": "没有真实跑通的测试就不能判 pass"
+        }
+      ],
+      "mock_output": {
+        "verdict": "fail",
+        "summary": "实现本身正确，但没有任何测试被 pytest 收集到，无法确认「pytest 全部通过」这条验收标准。",
+        "cases": [
+          {
+            "name": "slugify('Hello World') 返回 hello-world",
+            "expectation": "返回 hello-world",
+            "passed": true,
+            "detail": ""
+          },
+          {
+            "name": "pytest 全部通过",
+            "expectation": "pytest 收集到用例并全部通过",
+            "passed": false,
+            "detail": "真实执行 exit code 5：no tests ran，说明测试文件缺失或命名不符合 pytest 约定"
+          }
+        ],
+        "risks": [
+          "未实际验证：测试文件不存在"
+        ]
+      },
+      "mock_bad_output": {
+        "verdict": "pass",
+        "summary": "代码静态核对无误，验收标准全部满足。",
+        "cases": [
+          {
+            "name": "pytest 全部通过",
+            "expectation": "pytest 全部通过",
+            "passed": true,
+            "detail": ""
+          }
+        ],
+        "risks": []
+      },
+      "mock_bad_reason": "无视「没有收集到测试」而报 pass——这正是真实模型验证时出现过的假阴性"
+    },
+    {
+      "id": "review-clean-implementation",
+      "agent": "reviewer",
+      "kind": "defect_detection",
+      "title": "对照组：不能给出无依据的打回意见（不测「必须 approved」）",
+      "input": {
+        "prd": {
+          "title": "实现待办事项接口",
+          "summary": "提供待办的增删改查。",
+          "goals": [
+            "支持创建待办"
+          ],
+          "user_stories": [],
+          "acceptance_criteria": [
+            "同一 user_id 下已存在相同 title 时，POST 返回 409 且不创建新记录"
+          ],
+          "out_of_scope": [],
+          "open_questions": []
+        },
+        "architecture": {
+          "overview": "api → service → repository 三层；service 通过注入的 repository 做数据访问，事务由 service 提交。",
+          "components": [
+            {
+              "name": "todo_service",
+              "responsibility": "业务规则与事务边界",
+              "depends_on": [
+                "todo_repository"
+              ]
+            },
+            {
+              "name": "todo_repository",
+              "responsibility": "数据读写（含 find_by_title）",
+              "depends_on": []
+            }
+          ],
+          "data_model": [
+            "todos: id, user_id, title, completed；UNIQUE(user_id, title)"
+          ],
+          "api_endpoints": [
+            "POST /api/todos —— 创建待办"
+          ],
+          "key_decisions": [
+            "唯一性双保险：service 预校验给友好 409，库级 UNIQUE 约束兜并发；撞约束时捕获 IntegrityError 转 409",
+            "表结构变更由 Alembic 迁移管理，不依赖 create_all"
+          ],
+          "risks": [],
+          "test_strategy": [
+            "唯一性集成测试覆盖串行与并发两种场景"
+          ]
+        },
+        "patch_summary": "新增待办创建接口：repository 提供查询、service 预校验 + 捕获唯一约束冲突、并附迁移脚本。",
+        "changes": [
+          {
+            "path": "app/repositories/todo_repository.py",
+            "new_content": "class TodoRepository:\n    def __init__(self, session):\n        self._session = session\n\n    async def find_by_title(self, user_id, title):\n        stmt = select(Todo).where(Todo.user_id == user_id, Todo.title == title)\n        return (await self._session.execute(stmt)).scalar_one_or_none()\n",
+            "reason": "数据访问下沉到 repository 层"
+          },
+          {
+            "path": "app/todo_service.py",
+            "new_content": "from sqlalchemy.exc import IntegrityError\n\nfrom app.common.exceptions import ConflictError\n\nclass TodoService:\n    def __init__(self, session, repo):\n        self._session = session\n        self._repo = repo\n\n    async def create(self, user_id, title):\n        # 预校验：命中即友好失败，省掉一次必然失败的写入\n        if await self._repo.find_by_title(user_id, title) is not None:\n            raise ConflictError(\"Duplicate title\", code=\"TODO_TITLE_DUPLICATED\")\n        todo = Todo(user_id=user_id, title=title)\n        self._session.add(todo)\n        try:\n            await self._session.commit()\n        except IntegrityError as exc:\n            # 并发兜底：预校验存在 TOCTOU 窗口，两个请求可能同时通过预校验，\n            # 后写入者撞库级唯一约束。只把「确实是标题唯一约束」的冲突转 409，\n            # 其它完整性错误（如外键无效）原样抛出 —— 否则会把真实故障伪装成 409\n            await self._session.rollback()\n            # 约束名匹配要兼顾不同库：PostgreSQL 的报错带约束名，\n            # SQLite 只说 UNIQUE constraint failed: todos.user_id, todos.title\n            # —— 只认约束名会让 SQLite 上原样抛 500\n            message = str(getattr(exc, \"orig\", exc))\n            if \"uq_todo_user_title\" in message or \"todos.user_id, todos.title\" in message:\n                raise ConflictError(\"Duplicate title\", code=\"TODO_TITLE_DUPLICATED\") from None\n            raise\n        return todo\n",
+            "reason": "预校验 + 仅对标题唯一约束冲突转 409"
+          },
+          {
+            "path": "app/models/todo.py",
+            "new_content": "class Todo(Base):\n    __tablename__ = \"todos\"\n    # 并发下唯一可靠的保证：唯一约束落在数据层，而不是只靠应用层判断\n    __table_args__ = (UniqueConstraint(\"user_id\", \"title\", name=\"uq_todo_user_title\"),)\n",
+            "reason": "库级唯一约束"
+          },
+          {
+            "path": "migrations/versions/20260923_add_todo_unique_constraint.py",
+            "new_content": "import sqlalchemy as sa\n\n\ndef upgrade():\n    # 已有重复数据时唯一约束会创建失败：先显式检查并报错，\n    # 让人决定怎么清理，而不是让迁移神秘地挂掉\n    duplicates = op.get_bind().execute(\n        sa.text(\"SELECT user_id, title, COUNT(*) c FROM todos GROUP BY user_id, title HAVING c > 1\")\n    ).fetchall()\n    if duplicates:\n        raise RuntimeError(f\"存在重复的 (user_id, title)：{duplicates[:5]}，请先清理再迁移\")\n    with op.batch_alter_table(\"todos\") as batch:\n        batch.create_unique_constraint(\"uq_todo_user_title\", [\"user_id\", \"title\"])\n\n\ndef downgrade():\n    with op.batch_alter_table(\"todos\") as batch:\n        batch.drop_constraint(\"uq_todo_user_title\", type_=\"unique\")\n",
+            "reason": "唯一约束迁移（sa.text 取连接、batch 模式兼顾 SQLite、含 downgrade）"
+          }
+        ],
+        "diff": "--- a/app/todo_service.py\n+++ b/app/todo_service.py\n-        await self._session.commit()\n+        try:\n+            await self._session.commit()\n+        except IntegrityError as exc:\n+            await self._session.rollback()\n+            message = str(getattr(exc, \"orig\", exc))\n+            if \"uq_todo_user_title\" in message or \"todos.user_id, todos.title\" in message:\n+                raise ConflictError(\"Duplicate title\", code=\"TODO_TITLE_DUPLICATED\") from None\n+            raise\n--- a/app/models/todo.py\n+++ b/app/models/todo.py\n+    __table_args__ = (UniqueConstraint(\"user_id\", \"title\", name=\"uq_todo_user_title\"),)\n--- /dev/null\n+++ b/migrations/versions/20260923_add_todo_unique_constraint.py\n+import sqlalchemy as sa\n+\n+\n+def upgrade():\n+    duplicates = op.get_bind().execute(\n+        sa.text(\"SELECT user_id, title, COUNT(*) c FROM todos GROUP BY user_id, title HAVING c > 1\")\n+    ).fetchall()\n+    if duplicates:\n+        raise RuntimeError(f\"存在重复的 (user_id, title)：{duplicates[:5]}，请先清理再迁移\")\n+    with op.batch_alter_table(\"todos\") as batch:\n+        batch.create_unique_constraint(\"uq_todo_user_title\", [\"user_id\", \"title\"])\n+\n+\n+def downgrade():\n+    with op.batch_alter_table(\"todos\") as batch:\n+        batch.drop_constraint(\"uq_todo_user_title\", type_=\"unique\")\n",
+        "test_report": {
+          "verdict": "pass",
+          "summary": "唯一性串行与并发场景均通过，迁移脚本已随变更提交。",
+          "cases": [
+            {
+              "name": "重复标题返回 409",
+              "expectation": "返回 409",
+              "passed": true,
+              "detail": ""
+            },
+            {
+              "name": "并发写入只成功一条，后到者返回 409 而非 500（按约束名判定）",
+              "expectation": "捕获 IntegrityError 转 409",
+              "passed": true,
+              "detail": ""
+            }
+          ],
+          "risks": []
+        }
+      },
+      "expect": {
+        "verdict": "approved"
+      },
+      "assertions": [
+        {
+          "type": "findings_substantiated",
+          "path": "findings",
+          "message": "严重意见必须指出具体文件与具体问题（不测结论宽松度）"
+        }
+      ],
+      "mock_output": {
+        "verdict": "needs_revision",
+        "summary": "功能与验收标准一致；另有一处并发错误映射的边界建议（已具名文件与位置）。",
+        "findings": [
+          {
+            "severity": "major",
+            "file": "app/todo_service.py",
+            "comment": "捕获 IntegrityError 后按约束名匹配，但不同数据库的报错文本不同，建议补一层兼容再上线"
+          }
+        ]
+      },
+      "mock_bad_output": {
+        "verdict": "needs_revision",
+        "summary": "建议补充更多测试。",
+        "findings": [
+          {
+            "severity": "blocker",
+            "file": "",
+            "comment": "不够好"
+          }
+        ]
+      },
+      "mock_bad_reason": "无依据地打回——评估集要能惩罚「为了安全一律打回」",
+      "revision_note": "历经四轮，每轮模型的反对意见都成立：v1 缺库级约束、v2 diff 被 shell 吃掉反斜杠、v3 diff 截断缺 downgrade、v4 迁移里 text() 未导入且错误匹配只认 PostgreSQL 的约束名。同时把断言从「必须 approved」改成「严重意见必须有依据」—— 严格审查者总能找出合理的改进点，断言 approved 只会奖励宽松而不是严谨。",
+      "batch": ""
+    }
+  ],
+  "lessons": [
+    "fixture 要经得起推敲：三次被指出问题（缺库级约束 / diff 转义被吃 / diff 截断缺 downgrade），三次都对。",
+    "文本类 fixture 一律用文件写入工具生成，不要经 shell 转义 —— 反斜杠会被吃掉。",
+    "对照组必须选「无可争议」的实现，否则量到的是 fixture 的缺陷，不是模型的判断力。"
+  ]
+}
