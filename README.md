@@ -708,11 +708,45 @@ autogenerate 也有一个固定坑：模型里的 `JSONB` 变体（PostgreSQL �
 （如 `AUTOINCREMENT`）漏到别的方言里。这不需要连真实数据库就能抓到绝大多数
 类型不兼容问题 —— 真机验证仍是部署时的验收步骤，但不该等到那时才发现。
 
-### 迁移与模型一致性验证
+### 迁移与模型一致性验证（含真 MySQL 验收）
 
-改完模型的验证手法（本地已验证过一次，9 张表零差异）：在一个空库上
-`alembic upgrade head`，在另一个空库上 `create_all()`，然后比对两边的
-表名与列定义（`pragma table_info`）。不一致就说明迁移漏了改动。
+验证手法：空库 A 跑 `alembic upgrade head`，空库 B 跑 `create_all()`，逐表比对表名、
+列定义与约束。不一致就说明迁移漏了改动。
+
+2026-09-23 在**真 MySQL 8.4**（Docker）上完整验过一遍：
+
+| 检查 | 结果 |
+|---|---|
+| `alembic upgrade head` | ✅ 9 张表全部建成 |
+| 与 `create_all()` 建出的库比对 | ✅ 表名、列定义、约束**零差异** |
+| SQLite 上同样比对 | ✅ 一致 |
+| 完整工作流（注册 → 项目 → 需求 → 启动 → 补丁审批 → 恢复 → 最终批准） | ✅ `COMPLETED`，5 份交付物 |
+| 幂等重放、中文 + emoji 往返 | ✅ 200 + `Idempotent-Replay`；文本无损（utf8mb4） |
+| 类型落地 | UUID → `CHAR(32)`；JSON → 原生 `JSON` |
+
+这次真机验收抓到一个**只在 MySQL 上才暴露**的 bug，值得单独记：
+
+> **`approvals.tool_call_id → tool_calls` 与 `tool_calls.approval_id → approvals`
+> 互相引用，构成外键环。**
+>
+> 后果不是「警告一下」：SQLAlchemy 的排序器遇到环会**放弃这两张表的依赖关系**
+> （只发一条 `SAWarning: Cannot correctly sort tables…`），于是 `approvals` 被排到
+> `users` 前面。而 ——
+> - SQLite 容忍前向引用 → 本地一切正常；
+> - `create_all()` 会把环上的外键**延后成 ALTER** → 直接建库也正常；
+> - **autogenerate 生成的迁移是内联外键的** → MySQL 直接
+>   `(1824, "Failed to open the referenced table 'users'")`。
+>
+> 修法是**拆环**：保留 `approvals.tool_call_id` 列（目前只读不写，纯追溯用），
+> 去掉这条外键；另一条 `tool_calls.approval_id` 不能动 —— 审批重放判定要查它。
+> 没用 `use_alter=True` 绕开的原因写在 `app/models/approval.py` 的注释里：
+> SQLite 不支持 ALTER 添加约束，那条路会让约束在 SQLite 上静默失效 ——
+> 声明了却不生效的约束，比不声明更危险。
+>
+> 三个回归用例把这条路径封住了（`tests/unit/test_schema_portability.py`）：
+> 模型不许有外键环、SQLAlchemy 排序不许告警、**迁移的建表顺序必须满足
+> 「被引用的表已存在」**（最后一条是唯一能在没有 MySQL 的情况下提前发现它的地方）。
+> 三个用例都做过反向验证：把环放回去、打乱迁移顺序，用例确实报错。
 
 ---
 
@@ -896,7 +930,29 @@ docker tag  docker.m.daocloud.io/library/python:3.12-slim python:3.12-slim
 | 进程内限流与事件广播 | Redis | 多 worker 下不共享状态：额度被乘以 worker 数、SSE 事件时有时无 |
 
 配了 `REDIS_URL` 之后限流与事件都会走 Redis（发布订阅 + `INCR` 计数）。
-**没配也不会起不来**，但启动日志会明确警告这两件事 —— 详见「限流与实时事件」小节。
+**没配也不会起不来**，但启动日志会明确警告 —— 详见「限流与实时事件」小节。
+
+⚠️ **`redis` 是可选依赖，配了 `REDIS_URL` 不等于装上了它。** 这是个真踩过的坑：
+compose 一度只装 `--extra mysql`，于是镜像里没有 `redis` 包 ——
+应用不崩，只在启动日志里报一行错，然后**静默退化成进程内状态**，
+正好是「配 Redis 想避免」的那两个问题。两处修正：
+
+- compose 的构建参数改成 `EXTRAS: "mysql,redis"`
+- 启动检查不再把这种情况说成「REDIS_URL is not set」——**「配了却不生效」与「没配」
+  是两件事，报同一句话会让运维照着错误提示去查环境变量，永远查不出真因**。
+  现在这种情况以 error 级别明说「redis 包可能没装」
+
+### 数据库驱动也要装对（`cryptography`）
+
+`mysql` extra 里除了 `aiomysql` 还必须带 `cryptography`。MySQL 8 默认认证插件是
+`caching_sha2_password`，`PyMySQL`/`aiomysql` 处理它需要 `cryptography`，缺了直接抛：
+
+```
+RuntimeError: 'cryptography' package is required for sha256_password or caching_sha2_password
+```
+
+这个错在「装完依赖、第一次连库」时才出现，而 pyproject 最初只写了 `aiomysql` ——
+等于按文档装起来就连不上库。加在 extra 里（而不是写进 README 让人自己踩）才是修法。
 
 ### 表结构用迁移，不要依赖 create_all
 
@@ -965,7 +1021,7 @@ docker tag  docker.m.daocloud.io/library/python:3.12-slim python:3.12-slim
 | `audit_logs` | 暂缓 | 工具级审计已由 `tool_calls` 覆盖；审批有自己的记录（approvals）。
   全局操作审计等到有真实合规需求再加 |
 
-## 已知取舍（不是遗漏，是选择）
+### 其它取舍
 
 - **任何登录用户都能看到全部用户的邮箱**（`GET /users`）。这是为了让「添加项目成员」
   这条流程可用 —— 你得先能查到那个人的 id。在本地协作平台里可接受；若要对外，
