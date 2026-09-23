@@ -10,6 +10,19 @@
 文件库 + NullPool 让每个会话都拿到独立连接：事务边界是真实的，回滚是真的
 回滚，和不内存库的取舍换来的是「测试失败时错误信息指向真正的问题」。
 
+**真数据库模式（T1）**：设 ``TEST_DATABASE_URL`` 环境变量即可把
+integration / api 套件跑在真 MySQL 上，模板里用 ``{dbname}`` 占位：
+
+    TEST_DATABASE_URL='mysql+aiomysql://root:密码@127.0.0.1:13306/{dbname}?charset=utf8mb4' \\
+        pytest tests/integration tests/api
+
+每个用例 **CREATE DATABASE 一个独立库**（毫秒级），用完 DROP。之前设想的
+「整轮建一次库 + 用例间 TRUNCATE」没有采用：它要处理外键检查开关、
+TRUNCATE 顺序、以及任何测试遗留状态对后续用例的渗漏；而实测建库 +
+create_all 的开销完全可接受（integration 约 1.5 倍、api 约 1.8 倍耗时），
+换来的是与 SQLite 模式**完全相同**的隔离语义 —— 不多一种要理解的机制。
+不设变量时行为与从前完全一致（SQLite）。
+
 另外这里刻意 **不触发应用的 lifespan**（httpx 的 ASGITransport 默认不跑
 lifespan），避免它把全局引擎换成配置里的文件库、把测试数据写到仓库里。
 建表由 engine 夹具显式完成。
@@ -17,13 +30,15 @@ lifespan），避免它把全局引擎换成配置里的文件库、把测试数
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+import os
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
 
@@ -37,11 +52,69 @@ from app.models.user import User
 API = "/api/v1"
 DEFAULT_PASSWORD = "StrongPass123!"
 
+# 真 MySQL 模式的开关：模板里必须含 {dbname} 占位。不设 = SQLite（默认）
+_TEST_DATABASE_URL_TEMPLATE = os.environ.get("TEST_DATABASE_URL", "").strip()
+
+
+def _mysql_admin_kwargs() -> dict[str, Any]:
+    """从模板 URL 解析出建库 / 删库用的连接参数（不需要库名本身）。"""
+
+    url = make_url(_TEST_DATABASE_URL_TEMPLATE.replace("{dbname}", "admin"))
+    assert url.drivername.startswith("mysql"), "TEST_DATABASE_URL 目前只支持 MySQL 模板（含 {dbname} 占位）"
+    return {
+        "host": url.host or "127.0.0.1",
+        "port": url.port or 3306,
+        "user": url.username or "root",
+        "password": url.password or "",
+        "charset": "utf8mb4",
+        "autocommit": True,
+    }
+
+
+def _create_test_database(dbname: str) -> None:
+    import pymysql
+
+    conn = pymysql.connect(**_mysql_admin_kwargs())
+    try:
+        with conn.cursor() as cur:
+            # dbname 由本模块生成（固定前缀 + hex），无注入面；反引号是防御性写法
+            cur.execute(f"CREATE DATABASE `{dbname}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+    finally:
+        conn.close()
+
+
+def _drop_test_database(dbname: str) -> None:
+    import pymysql
+
+    try:
+        conn = pymysql.connect(**_mysql_admin_kwargs())
+    except Exception as exc:  # noqa: BLE001 - 清理失败不该把测试结果染红
+        print(f"[conftest] 清理测试库 {dbname} 时连接失败（保留现场）：{exc}")
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP DATABASE IF EXISTS `{dbname}`")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[conftest] 清理测试库 {dbname} 失败（保留现场）：{exc}")
+    finally:
+        conn.close()
+
 
 @pytest.fixture
-def test_settings(tmp_path: Path) -> Settings:
-    database_url = f"sqlite+aiosqlite:///{(tmp_path / 'test.db').as_posix()}"
-    return Settings(
+def test_settings(tmp_path: Path) -> Iterator[Settings]:
+    if _TEST_DATABASE_URL_TEMPLATE:
+        # 真库模式：库名唯一，隔离语义与 SQLite 模式完全一致。
+        # CREATE 在这里（setup）、DROP 在 yield 之后（teardown）——
+        # engine 夹具依赖本夹具，它的 teardown 先跑（连接全部关闭），
+        # 之后才能安全 DROP，否则 MySQL 会因为仍有连接而行为不明
+        dbname = f"aidev_test_{uuid4().hex[:12]}"
+        _create_test_database(dbname)
+        database_url = _TEST_DATABASE_URL_TEMPLATE.replace("{dbname}", dbname)
+    else:
+        dbname = None
+        database_url = f"sqlite+aiosqlite:///{(tmp_path / 'test.db').as_posix()}"
+
+    yield Settings(
         app_env="test",
         # 关掉 debug 只为让测试输出干净（debug 会把根 logger 降到 DEBUG，
         # asyncio / aiosqlite 的马达日志会淹没真正的失败信息）
@@ -60,6 +133,9 @@ def test_settings(tmp_path: Path) -> Settings:
         # SSE 心跳调小，测试不用等 15 秒
         sse_heartbeat_seconds=0.2,
     )
+
+    if dbname is not None:
+        _drop_test_database(dbname)
 
 
 @pytest.fixture
