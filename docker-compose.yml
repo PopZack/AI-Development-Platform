@@ -25,7 +25,10 @@ services:
         EXTRAS: "mysql,redis"
     env_file: .env
     environment:
-      APP_ENV: prod
+      # 可被 .env 覆盖（CI 冒烟用 dev + mock provider；默认仍是 prod，
+      # 保持「部署即生产护栏」的原语义 —— 之前这里硬编码 prod，会悄悄
+      # 盖掉 .env 里的 APP_ENV，属于编排层越权
+      APP_ENV: ${APP_ENV:-prod}
       # 生产用迁移管理表结构：create_all 只会建缺失的表，不会给已有表加列
       AUTO_CREATE_TABLES: "false"
       DATABASE_URL: mysql+aiomysql://aidev:${MYSQL_PASSWORD:?请在 .env 里设置 MYSQL_PASSWORD}@db:3306/aidev?charset=utf8mb4
