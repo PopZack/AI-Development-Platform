@@ -38,9 +38,14 @@ class Settings(BaseSettings):
     api_v1_prefix: str = "/api/v1"
 
     # ---------- 数据库 ----------
-    # Stage 1 用 SQLite；换 MySQL 时只改这里与驱动，Repository/Service 接口不变
+    # 默认 SQLite；换 MySQL / PostgreSQL 时只改这里与驱动，Repository/Service 接口不变
     database_url: str = "sqlite+aiosqlite:///./data/ai_dev_team.db"
     sql_echo: bool = False
+    # 启动时自动建表（本地/测试方便）。
+    # ⚠️ 生产必须关掉并用 `alembic upgrade head`：create_all **只建缺失的表，
+    #    不会给已有表加列** —— 发新版本时它会静默什么都不做，然后应用在运行中
+    #    报 "no such column"，而且看起来像代码 bug 而不是迁移漏了。
+    auto_create_tables: bool = True
 
     # ---------- 认证 ----------
     jwt_secret_key: str = DEFAULT_JWT_SECRET

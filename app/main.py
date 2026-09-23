@@ -64,7 +64,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     redis_client = app.state.redis
 
     configure_database(create_engine(settings))
-    await create_all()
+    if settings.auto_create_tables:
+        await create_all()
+    else:
+        logger.info("AUTO_CREATE_TABLES=false：表结构由 alembic 管理（alembic upgrade head）")
     await bus.start()
 
     logger.info(
@@ -103,6 +106,11 @@ def _warn_about_single_process_setup(settings: Settings, redis_client: object | 
         )
     if not settings.rate_limit_enabled:
         logger.warning("rate limiting is disabled (RATE_LIMIT_ENABLED=false)")
+    if settings.app_env == "prod" and settings.auto_create_tables:
+        logger.warning(
+            "APP_ENV=prod 且 AUTO_CREATE_TABLES=true：create_all 不会给已有表加列，"
+            "发版时必须靠 `alembic upgrade head` 迁移，建议把 AUTO_CREATE_TABLES 设为 false"
+        )
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:

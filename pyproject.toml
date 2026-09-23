@@ -14,6 +14,7 @@ dependencies = [
     "email-validator>=2.2.0",
     "argon2-cffi>=23.1.0",
     "pyjwt>=2.9.0",
+    "alembic>=1.20.0",
 ]
 
 [dependency-groups]
@@ -35,6 +36,10 @@ addopts = "-q"
 [tool.ruff]
 line-length = 110
 target-version = "py312"
+# 自动生成的迁移脚本不按手写代码的标准 lint：里面的单引号、长行都是
+# alembic autogenerate 的产物，改了下次生成还会覆盖回来，纯属制造无意义的 diff。
+# （migrations/env.py 是手写的，照常检查）
+extend-exclude = ["migrations/versions"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

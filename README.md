@@ -635,6 +635,55 @@ APPROVAL_REQUIRED，含入参、结果摘要、错误码、耗时。
 
 ---
 
+## 数据库迁移与跨方言（Stage 5：部署给多人用）
+
+### 迁移用 Alembic，生产不要依赖 create_all
+
+```bash
+alembic upgrade head                                # 应用迁移
+alembic revision --autogenerate -m "add xxx"        # 改完模型后生成迁移
+alembic upgrade head --sql > migration.sql          # 只出 SQL（DBA 审阅 / 手工执行）
+```
+
+⚠️ **`create_all()` 只建缺失的表，不会给已有表加列。** 本地用着方便，但发新版本时
+它会**静默什么都不做**，然后应用在运行中报 `no such column` —— 看起来像代码 bug，
+实际是迁移漏了。所以生产设 `AUTO_CREATE_TABLES=false`，表结构一律走 Alembic。
+
+三个配置上的坑（都写在代码注释里了）：
+
+1. **`alembic.ini` 里不写 `sqlalchemy.url`**，由 `migrations/env.py` 从应用配置读。
+   两处各配一次必然漂移，而漂移的表现是「迁移跑在 A 库、应用连的是 B 库」。
+2. **`alembic.ini` 保持纯 ASCII**。Alembic 用**系统 locale 编码**读这个文件，
+   Windows + GBK 环境下任何中文注释都会让所有 alembic 命令报
+   `UnicodeDecodeError`。中文说明放在 `env.py`（Python 文件按 UTF-8 读）。
+3. **`env.py` 必须 `import app.models`**。`Base.metadata` 靠「模型被导入」才填充；
+   漏了这一步，autogenerate 会认为所有表都多余，生成一个把库删干净的迁移。
+
+autogenerate 也有一个固定坑：模型里的 `JSONB` 变体（PostgreSQL 用）会让它生成
+`postgresql.JSONB(astext_type=Text())` 却**不导入 `Text`**，迁移执行到那一行才
+`NameError`（表建到一半）。每次 autogenerate 之后都要检查导入。
+
+### 跨方言
+
+| 方言 | UUID 主键 | JSON 列 |
+|---|---|---|
+| PostgreSQL | 原生 `UUID` | `JSON`（模型里对 PG 用 `JSONB`） |
+| MySQL | `CHAR(32)` | 原生 `JSON` |
+| SQLite | `CHAR(32)` | `JSON`（实际是 TEXT） |
+
+`tests/unit/test_schema_portability.py` 把全部表的 `CREATE TABLE` 与索引**编译成
+三种方言**，断言都能编译通过、UUID/JSON 落地类型正确、没有 SQLite 专属写法
+（如 `AUTOINCREMENT`）漏到别的方言里。这不需要连真实数据库就能抓到绝大多数
+类型不兼容问题 —— 真机验证仍是部署时的验收步骤，但不该等到那时才发现。
+
+### 迁移与模型一致性验证
+
+改完模型的验证手法（本地已验证过一次，9 张表零差异）：在一个空库上
+`alembic upgrade head`，在另一个空库上 `create_all()`，然后比对两边的
+表名与列定义（`pragma table_info`）。不一致就说明迁移漏了改动。
+
+---
+
 ## 数据库
 
 首期核心表（已建）：`users`、`projects`、`project_members`、`requirements`、`workflow_runs`、`agent_runs`、`artifacts`
