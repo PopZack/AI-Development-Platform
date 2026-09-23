@@ -1,0 +1,83 @@
+# 多人部署编排：应用 + MySQL + Redis
+#
+# 为什么是 MySQL/Redis 而不是继续用 SQLite / 进程内状态：
+# - SQLite 单文件写锁：多人并发下「写事务排队」会直接暴露给用户
+# - 限流与 SSE 事件的计数/广播必须跨进程共享，否则多 worker 下额度翻倍、
+#   事件时有时无（详见 README「部署」小节）
+#
+# 用法：
+#   1) cp .env.example .env 并填好 JWT_SECRET_KEY / LLM_API_KEY / LLM_MODEL
+#   2) docker compose up -d --build
+#   3) 打开 http://<主机>:8000/ui/
+#
+# ⚠️ APP_ENV=prod 时配置层会拒绝默认 JWT 密钥、Mock Provider 与空密钥，
+#    这是刻意的：带着占位配置跑生产，问题会以「数据看起来不对」的形式出现。
+
+services:
+  app:
+    build:
+      context: .
+      args:
+        EXTRAS: "mysql"
+    env_file: .env
+    environment:
+      APP_ENV: prod
+      # 生产用迁移管理表结构：create_all 只会建缺失的表，不会给已有表加列
+      AUTO_CREATE_TABLES: "false"
+      DATABASE_URL: mysql+aiomysql://aidev:${MYSQL_PASSWORD:?请在 .env 里设置 MYSQL_PASSWORD}@db:3306/aidev?charset=utf8mb4
+      REDIS_URL: redis://redis:6379/0
+      WORKSPACE_ROOT: /data/workspace
+      # 容器在反向代理后面时打开它，否则所有请求都算在代理 IP 上
+      RATE_LIMIT_TRUST_PROXY: "true"
+    ports:
+      - "8000:8000"
+    volumes:
+      - workspace:/data/workspace
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # 先迁移再起服务。多 worker（4 个）必须有 Redis —— 已在上面配上
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+             --proxy-headers --forwarded-allow-ips='*'"
+    restart: unless-stopped
+
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: aidev
+      MYSQL_USER: aidev
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 .env 里设置 MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请在 .env 里设置 MYSQL_ROOT_PASSWORD}
+    command:
+      # utf8mb4 是必须的：Agent 产出大量中文，而 MySQL 默认的 latin1 会直接乱码
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    # 限流与事件广播的 Redis 不需要持久化；但去掉 appendonly 前先想清楚
+    # 你是否依赖「重启后限流计数还在」
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  workspace:
+  mysql_data:

@@ -1078,10 +1078,12 @@ function render() {
 function renderModal() {
   if (state.modal === "new-project") {
     return modal("新建项目", `
-      <form data-act="create-project">
-        <div class="field"><label>项目名称</label><input name="name" required placeholder="比如：Todo API" /></div>
-        <div class="field"><label>描述（可选）</label><textarea name="description" placeholder="一句话说明这个项目要做什么"></textarea></div>
-        <div class="row" style="margin-top:18px;justify-content:flex-end">
+      <form data-act="create-project" class="modal__form">
+        <div class="modal__body">
+          <div class="field"><label>项目名称</label><input name="name" required placeholder="比如：Todo API" /></div>
+          <div class="field"><label>描述（可选）</label><textarea name="description" placeholder="一句话说明这个项目要做什么"></textarea></div>
+        </div>
+        <div class="modal__footer">
           <button type="button" class="btn btn--ghost" data-act="close-modal">取消</button>
           <button class="btn btn--primary" type="submit">创建</button>
         </div>
@@ -1089,15 +1091,17 @@ function renderModal() {
   }
   if (state.modal === "new-requirement") {
     return modal("新建需求", `
-      <form data-act="create-requirement">
-        <div class="field"><label>需求标题</label><input name="title" required placeholder="比如：实现待办事项接口" /></div>
-        <div class="field"><label>需求描述</label>
-          <textarea name="description" required placeholder="用自然语言写清要做什么、边界在哪。这段文字会直接进 Product Agent 的提示词。"></textarea></div>
-        <div class="field"><label>优先级</label>
-          <select name="priority"><option>P0</option><option selected>P1</option><option>P2</option><option>P3</option></select></div>
-        <div class="field"><label>验收标准（每行一条，可选）</label>
-          <textarea name="acceptance_criteria" placeholder="POST /api/todos 成功返回 201&#10;同一用户下标题重复时返回 409"></textarea></div>
-        <div class="row" style="margin-top:18px;justify-content:flex-end">
+      <form data-act="create-requirement" class="modal__form">
+        <div class="modal__body">
+          <div class="field"><label>需求标题</label><input name="title" required placeholder="比如：实现待办事项接口" /></div>
+          <div class="field"><label>需求描述</label>
+            <textarea name="description" required placeholder="用自然语言写清要做什么、边界在哪。这段文字会直接进 Product Agent 的提示词。"></textarea></div>
+          <div class="field"><label>优先级</label>
+            <select name="priority"><option>P0</option><option selected>P1</option><option>P2</option><option>P3</option></select></div>
+          <div class="field"><label>验收标准（每行一条，可选）</label>
+            <textarea name="acceptance_criteria" placeholder="POST /api/todos 成功返回 201&#10;同一用户下标题重复时返回 409"></textarea></div>
+        </div>
+        <div class="modal__footer">
           <button type="button" class="btn btn--ghost" data-act="close-modal">取消</button>
           <button class="btn btn--primary" type="submit">创建</button>
         </div>
@@ -1117,14 +1121,20 @@ function renderModal() {
           </div></div>`,
       )
       .join("");
-    return modal("添加项目成员", candidates || '<div class="faint">没有可添加的用户（已全部在项目里）</div>');
+    return modal(
+      "添加项目成员",
+      `<div class="modal__body">${candidates || '<div class="faint">没有可添加的用户（已全部在项目里）</div>'}</div>
+       <div class="modal__footer"><button type="button" class="btn btn--ghost" data-act="close-modal">关闭</button></div>`,
+    );
   }
   if (state.modal === "prompt-note") {
     return modal(state.modalTitle || "填写意见", `
-      <form data-act="note-submit">
-        <div class="field"><label>${esc(state.modalLabel || "审批意见")}</label>
-          <textarea name="note" placeholder="写清理由 —— 这条会落库并进审计"></textarea></div>
-        <div class="row" style="margin-top:18px;justify-content:flex-end">
+      <form data-act="note-submit" class="modal__form">
+        <div class="modal__body">
+          <div class="field"><label>${esc(state.modalLabel || "审批意见")}</label>
+            <textarea name="note" placeholder="写清理由 —— 这条会落库并进审计"></textarea></div>
+        </div>
+        <div class="modal__footer">
           <button type="button" class="btn btn--ghost" data-act="close-modal">取消</button>
           <button class="btn btn--primary" type="submit">提交</button>
         </div>

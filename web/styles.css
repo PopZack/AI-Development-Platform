@@ -413,12 +413,24 @@ pre.code .hunk { color: #7dd3fc; }
   display: grid; place-items: center; padding: 22px;
 }
 .modal__box {
-  width: min(560px, 100%); max-height: 86vh; overflow: auto;
+  width: min(560px, 100%); max-height: 86vh;
+  display: flex; flex-direction: column; min-height: 0;
   background: linear-gradient(180deg, rgba(16, 22, 40, 0.98), rgba(8, 12, 24, 0.98));
   border: 1px solid var(--border-strong); border-radius: 18px; padding: 24px;
   box-shadow: var(--shadow);
 }
-.modal__box h3 { margin: 0 0 4px; font-size: 17px; }
+.modal__box h3 { margin: 0 0 4px; font-size: 17px; flex: 0 0 auto; }
+
+/* 表单类弹层：**内容滚动、底部操作栏常驻**。
+   整块滚动会让「创建」按钮被挤到折叠线以下 —— 用户得先滚动才点得到，
+   小屏上甚至会以为没有提交按钮。 */
+form.modal__form { display: flex; flex-direction: column; min-height: 0; }
+.modal__body { overflow-y: auto; min-height: 0; padding-right: 4px; }
+.modal__footer {
+  display: flex; justify-content: flex-end; gap: 10px;
+  padding-top: 16px; margin-top: 16px; border-top: 1px solid var(--border);
+  flex: 0 0 auto;
+}
 
 /* 滚动条：默认那种亮灰色在深色主题里很扎眼 */
 ::-webkit-scrollbar { width: 10px; height: 10px; }

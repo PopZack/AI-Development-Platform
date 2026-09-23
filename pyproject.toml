@@ -17,6 +17,11 @@ dependencies = [
     "alembic>=1.20.0",
 ]
 
+[project.optional-dependencies]
+mysql = [
+    "aiomysql>=0.3.2",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8.3.0",

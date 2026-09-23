@@ -758,7 +758,79 @@ autogenerate 也有一个固定坑：模型里的 `JSONB` 变体（PostgreSQL �
 | Stage 2 | JWT 认证、密码哈希接入、Owner/Developer 角色、资源级权限、幂等键 | ✅ 已完成 |
 | Stage 3 | LLM Provider 抽象、Product / Architect Agent、结构化输出校验、Agent Run 记录 | ✅ 已完成 |
 | Stage 4 | 工作流状态机、Developer / Tester / Reviewer、Tool Gateway、审批、交付物汇总 | ✅ 已完成（真实测试执行等按文档划入 Stage 5） |
-| Stage 5 | Redis 限流、SSE、真实测试执行、Alembic、MySQL 兼容、Web UI（可选增强） | 🔄 进行中（限流 + SSE + Web UI 已完成；真实测试执行 / Alembic / 容器化部署待做） |
+| Stage 5 | Redis 限流、SSE、真实测试执行、Alembic、MySQL 兼容、Web UI（可选增强） | ✅ 已完成（含容器化部署） |
+
+---
+
+## Web UI（`/ui`）
+
+深空商务风格的单页应用，静态文件由 FastAPI 直接托管 —— **不用框架、不用构建步骤**，
+`docker compose up` 之后就能用。打开 `/` 会自动跳到 `/ui/`。
+
+覆盖的能力：登录注册、项目与成员、需求列表、需求详情（七步状态导轨、工作流操作、
+五个交付物标签页、审批卡片、工作区文件、**SSE 实时事件流**）。
+
+三条实现纪律（都在代码注释里）：
+
+1. **所有后端内容一律 escape 后再进 DOM**。PRD / 架构 / diff 都是模型生成的任意文本，
+   直接 `innerHTML` 等于给自己开一个 XSS
+2. **SSE 用 fetch 流式读，不用 `EventSource`** —— 后者带不了 `Authorization` 头，
+   只能把令牌放进 URL（进访问日志与浏览器历史）。接口仍保留 `?token=` 给第三方集成
+3. **长请求要有进度感**：start/resume 会真实调模型（20~40 秒），
+   界面显示进行中计时条而不是静默按钮
+
+界面截图（真实运行，非设计稿）：`shots/01-login.png`、`shots/02-requirement.png`。
+
+UI 验证抓到一个真问题：弹层表单字段多时，「创建」按钮被挤到折叠线以下 ——
+弹层整块滚动，用户得先滚动才点得到。已改成「头部固定 + 内容滚动 + 底部操作栏常驻」。
+
+---
+
+## 部署（多人使用）
+
+### 一条命令起一套
+
+```bash
+cp .env.example .env          # 填 JWT_SECRET_KEY / LLM_API_KEY / LLM_MODEL / MYSQL_PASSWORD
+docker compose up -d --build  # app(4 worker) + MySQL 8 + Redis
+# 打开 http://<主机>:8000/ui/
+```
+
+镜像做了三件事：多阶段构建（uv 只在 builder 阶段）、非 root 运行、
+`tests/` 与 `.env` 都不进镜像（`.dockerignore`）。
+
+### 多人部署必须换掉的两样东西
+
+| 本地 | 多人 | 为什么 |
+|---|---|---|
+| SQLite 单文件 | MySQL / PostgreSQL | SQLite 只有一个写锁，多人并发下「写事务排队」会直接暴露给用户 |
+| 进程内限流与事件广播 | Redis | 多 worker 下不共享状态：额度被乘以 worker 数、SSE 事件时有时无 |
+
+配了 `REDIS_URL` 之后限流与事件都会走 Redis（发布订阅 + `INCR` 计数）。
+**没配也不会起不来**，但启动日志会明确警告这两件事 —— 详见「限流与实时事件」小节。
+
+### 表结构用迁移，不要依赖 create_all
+
+`AUTO_CREATE_TABLES=false`（compose 里已设）+ 启动命令先跑 `alembic upgrade head`。
+原因见「数据库迁移与跨方言」小节：`create_all` 不给已有表加列，发版时会静默失效。
+
+### 上线前的检查清单
+
+- [ ] `JWT_SECRET_KEY` 换成真随机值（≥ 32 字节）。`APP_ENV=prod` 时配置层会拒绝默认值
+- [ ] `LLM_PROVIDER` 不是 `mock`（prod 下配置层直接拒绝启动）
+- [ ] `LLM_API_KEY` / `LLM_MODEL` 与 `LLM_BASE_URL` 是**同一套**（方舟的三条路径不能混用）
+- [ ] 反向代理后打开 `RATE_LIMIT_TRUST_PROXY=true`，**且代理确实会重写 `X-Forwarded-For`**
+      （直接暴露在公网时打开它，客户端可以伪造该头绕过限流）
+- [ ] `WORKSPACE_ROOT` 落在持久卷上（容器重建不该丢 Agent 写的代码）
+- [ ] 挂 HTTPS：令牌走 `Authorization` 头，明文 HTTP 等于把令牌公开
+- [ ] 备份 `mysql_data` 卷与 `workspace` 卷
+
+### 关于「执行模型写的代码」
+
+`run_pytest`（L3）会真实执行工作区里的测试代码。已做的隔离：
+固定可执行文件、参数白名单、cwd 锁定工作区、剥离环境变量中的疑似密钥、超时与输出上限。
+**这些都不是强边界** —— 真要跑不受信任的代码，请把工作区放进独立容器/沙箱
+（只读挂载宿主、断网、限制 CPU/内存），这是部署层的选择，本项目只保证不给你添乱。
 
 ---
 

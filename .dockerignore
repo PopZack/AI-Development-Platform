@@ -1,0 +1,35 @@
+# 构建上下文里不该出现的东西。
+#
+# 目的有两个：镜像更小、以及**不要把本机的密钥与数据打进镜像层**。
+# .env 一定要排掉 —— 镜像层是不可变的，一旦打进去，即使后续版本删掉，
+# 拿到镜像的人依然能把旧层解出来（这是很多人踩过的坑）。
+
+.git
+.gitignore
+.venv
+__pycache__/
+**/__pycache__/
+*.pyc
+.ruff_cache
+.pytest_cache
+
+# 本机数据与工作区：绝不进镜像（作品数据、演示库、Agent 写出来的文件）
+data/
+workspace/
+shots/
+
+# 密钥与本地配置
+.env
+.env.*
+!.env.example
+
+# 开发期文件
+tests/
+design_docs/
+README.md
+
+# 编辑器 / 系统噪音
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
