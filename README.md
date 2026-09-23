@@ -182,7 +182,7 @@ Authorization: Bearer <access_token>
 |---|---|---|---|
 | POST | `/requirements/{id}/analyze` | **OWNER / DEVELOPER** | Product Agent 生成 PRD。状态 `DRAFT → ANALYZING` |
 | POST | `/requirements/{id}/plan` | **OWNER / DEVELOPER** | Architect Agent 生成技术设计。状态 `ANALYZING → DESIGNED`，**必须先 analyze** |
-| GET | `/requirements/{id}/artifacts` | 项目成员（含 VIEWER） | 列出交付物，按版本升序，可用 `type` 过滤 |
+| GET | `/requirements/{id}/artifacts` | 项目成员（含 VIEWER） | 列出交付物，按创建时间升序（同批内按版本），可用 `type` 过滤 |
 | GET | `/requirements/{id}/deliverables` | 项目成员（含 VIEWER） | **交付物汇总**：每种类型取最新版 + 工作区文件清单 + 最近一次工作流 |
 
 **两个要提前知道的特性：**
@@ -729,6 +729,30 @@ autogenerate 也有一个固定坑：模型里的 `JSONB` 变体（PostgreSQL �
 
 验证手法：空库 A 跑 `alembic upgrade head`，空库 B 跑 `create_all()`，逐表比对表名、
 列定义与约束。不一致就说明迁移漏了改动。
+
+### 把测试套件跑在真 MySQL 上（CI 就是这么跑的）
+
+```bash
+TEST_DATABASE_URL='mysql+aiomysql://root:密码@127.0.0.1:3306/{dbname}?charset=utf8mb4' \
+    pytest tests/integration tests/api
+```
+
+不设 `TEST_DATABASE_URL` 时用 SQLite（每个用例一个临时文件库）。设了之后
+conftest 为**每个用例** `CREATE DATABASE` 一个独立库（毫秒级）、用完 `DROP` ——
+隔离语义与 SQLite 模式完全一致，不需要 TRUNCATE、不需要关外键检查。
+
+CI 的 `integration-and-api` job 就是这个模式（`mysql:8.4` service container），
+并且先跑 `alembic upgrade head` 验证迁移可执行 —— 外键环那类问题
+（SQLite 容忍、create_all 会延后环上的外键、只有迁移会炸）就是这条链路自动抓出来的。
+
+这条链路上线当天就抓到两个真问题（都已修复 + 守卫）：
+
+1. **MySQL 的 `DATETIME` 默认精度是秒** —— ORM 里带微秒的时间写进去被四舍五入，
+   「创建响应」与「重放读库」的 `created_at` 口径漂移（`08:24:28.826718` vs `08:24:29`）。
+   修：时间戳列统一 `DATETIME(fsp=6)`（`base.py` 的 `TimestampColumn`）。
+2. **交付物清单按 `version` 排序是错的** —— version 是「同类型内」的编号，
+   PRD/PATCH 都是 v1；时间戳坍缩到同一秒后顺序随机。
+   修：按创建时间排、版本做并列次序。
 
 2026-09-23 在**真 MySQL 8.4**（Docker）上完整验过一遍：
 

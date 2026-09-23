@@ -1,0 +1,129 @@
+# CI —— 三道防线对应三类「本地全绿、上线才炸」：
+#
+# 1. lint-and-unit        静态与纯单元（SQLite，快，每个 push/PR 都跑）
+# 2. integration-and-api  **真 MySQL 8.4** service container 上跑 integration + api，
+#                         并先执行 alembic upgrade head 验证迁移可执行。
+#                         动机：外键环那类问题在 SQLite 上完全隐身（容忍前向引用、
+#                         create_all 会延后环上的外键），只有真 MySQL 建表才炸 ——
+#                         这类差异必须由 CI 自动暴露，而不是靠某个人记得手工验一次。
+# 3. import-smoke         用 **--no-dev + extras**（与生产镜像完全相同的依赖集合）
+#                         导入 app.main。动机：httpx 只在 dev 组时本地一切正常，
+#                         镜像里 ModuleNotFoundError —— 静态守卫查 pyproject/lock，
+#                         这里验「装出来的环境真的能 import」。
+#
+# 验收方式（方案 DoD）：注入验证 —— 把外键环放回模型 → job 2 必红；
+# 删掉 httpx 依赖声明 → job 3 必红。注入分支跑过、看过红了再删。
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint-and-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Sync dependencies (with dev tools)
+        run: uv sync --frozen
+
+      - name: Lint (ruff check)
+        run: uv run ruff check .
+
+      - name: Format (ruff format --check)
+        run: uv run ruff format --check .
+
+      - name: Unit tests (SQLite)
+        run: uv run pytest tests/unit
+
+  integration-and-api-mysql:
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ciroot
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=40
+
+    env:
+      # 每个用例独立建库（{dbname} 由 conftest 替换），跑完即删
+      TEST_DATABASE_URL: mysql+aiomysql://root:ciroot@127.0.0.1:3306/{dbname}?charset=utf8mb4
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Sync dependencies (mysql extra)
+        run: uv sync --frozen --extra mysql
+
+      - name: Alembic migrations must apply on real MySQL
+        env:
+          # 迁移验证用独立的库：alembic 需要一个已存在的数据库
+          DATABASE_URL: mysql+aiomysql://root:ciroot@127.0.0.1:3306/aidev_ci_migrate?charset=utf8mb4
+        run: |
+          uv run python - <<'PY'
+          import asyncio
+
+          import aiomysql
+
+
+          async def main() -> None:
+              conn = await aiomysql.connect(
+                  host="127.0.0.1", port=3306, user="root", password="ciroot", autocommit=True
+              )
+              cur = await conn.cursor()
+              await cur.execute(
+                  "CREATE DATABASE IF NOT EXISTS aidev_ci_migrate "
+                  "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+              )
+              conn.close()
+
+
+          asyncio.run(main())
+          PY
+          uv run alembic upgrade head
+          uv run alembic current
+
+      - name: Integration + API tests (real MySQL)
+        run: uv run pytest tests/integration tests/api
+
+  import-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Sync like the production image (--no-dev + extras)
+        # 刻意**不加 --frozen**：要从 pyproject 重新解析。
+        # 假如有人把 httpx 从依赖里删掉而忘了改代码，--frozen 会照着旧 lock
+        # 把 httpx 装上，冒烟永远绿 —— 注入验证就失效了
+        run: uv sync --no-dev --extra mysql --extra redis
+
+      - name: Import app.main in the image-equivalent environment
+        run: uv run --no-sync python -c "import app.main; print('app.main imports ok')"
