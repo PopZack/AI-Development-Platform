@@ -19,6 +19,7 @@ Layer: Infrastructure —— 这是**唯一**允许出现「火山方舟」四�
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -88,8 +89,26 @@ class ArkLLMProvider(LLMProvider):
             "model": self._model,
             "messages": [{"role": m.role, "content": m.content} for m in request.messages],
             "temperature": request.temperature,
+            # ⚠️ 流式是**必需的**，不是性能优化。
+            #
+            # httpx 的 timeout 是**读超时**（两次数据到达之间的最大间隔），不是总时长。
+            # 非流式下「服务端把整包算完才发第一个字节」，于是读超时退化成总时长上限；
+            # 而一次 Agent 调用的服务端推理期实测可以到 300s+（deepseek-v4-flash
+            # 的推理 token 也算在 completion_tokens 里）→ 客户端在整段推理期里
+            # 收不到任何一个字节，180s 读超时必然触发，而且重试只是把同样的
+            # 长请求再压一遍（实测 3 次尝试白等 540s）。
+            #
+            # 流式把这个语义换成「等下一个数据块」——探针实测块间最大间隔 0.5s，
+            # 首字节 1.3s。同一个 timeout 值，含义完全不同。
+            "stream": True,
+            # 流式下 usage 只在最后一块给；不要它就得自己估 token，
+            # 而 agent_runs 的用量统计是要给人看的
+            "stream_options": {"include_usage": True},
         }
         if request.max_tokens is not None:
+            # ⚠️ 这个参数**本端点实测不生效**（请求 60，实得 568 个 completion token），
+            # 见 scripts/probe_llm_endpoint.py。留着是为了「端点哪天支持了」，
+            # 但**不要指望它兜住输出规模**。
             payload["max_tokens"] = request.max_tokens
         if request.json_mode:
             # 只是「请求」模型输出 JSON。有些模型不支持，上游会回 400，
@@ -98,7 +117,8 @@ class ArkLLMProvider(LLMProvider):
             payload["response_format"] = {"type": "json_object"}
 
         try:
-            response = await self._client.post(
+            async with self._client.stream(
+                "POST",
                 self._url,
                 json=payload,
                 # 绝不把 key 写进日志：下面所有 logger 调用都只打状态码和错误摘要
@@ -106,7 +126,12 @@ class ArkLLMProvider(LLMProvider):
                     "Authorization": f"Bearer {self._api_key}",
                     "Content-Type": "application/json",
                 },
-            )
+            ) as response:
+                if response.status_code >= 400:
+                    # 流式响应体默认没读；_map_error 要构造错误摘要就必须先把 body 拉出来
+                    await response.aread()
+                    raise self._map_error(response)
+                return await self._consume_stream(response)
         except httpx.TimeoutException as exc:
             raise LLMTimeoutError(
                 "Ark request timed out", details={"url": self._url, "model": self._model}
@@ -118,10 +143,89 @@ class ArkLLMProvider(LLMProvider):
                 details={"url": self._url, "model": self._model},
             ) from exc
 
-        if response.status_code >= 400:
-            raise self._map_error(response)
+    async def _consume_stream(self, response: httpx.Response) -> LLMResponse:
+        """把 SSE 流拼成一次完整的响应。
 
-        return self._parse(response)
+        对外仍然给一个「非流式形状」的 ``LLMResponse`` —— **上游是不是流式，
+        不该渗透到上层**。上层只关心：内容是什么、用了多少 token。
+        """
+        parts: list[str] = []
+        usage_body: dict[str, Any] | None = None
+        model = self._model
+        saw_chunk = False
+        saw_reasoning = False
+
+        async for line in response.aiter_lines():
+            if not line.startswith("data:"):
+                # SSE 注释与心跳（有些网关会插 keep-alive）直接跳过
+                continue
+            data = line[5:].strip()
+            if not data or data == "[DONE]":
+                continue
+            try:
+                body = json.loads(data)
+            except json.JSONDecodeError:
+                # 单个坏块不让整次调用失败：拼出来的内容最终要过 Pydantic 校验，
+                # 真坏了会在内容层暴露（并带着「上次输出」重试），
+                # 而在这里判成传输错误反而会丢掉已经收到的内容
+                logger.warning("ark streamed a non-JSON chunk | model=%s", self._model)
+                continue
+
+            if body.get("error"):
+                # 流中途报错（少数网关这么干）。它没法带 HTTP 状态码，
+                # 所以只能当传输错误 —— 但把上游原文带上，别让人猜
+                raise LLMTransportError(
+                    "Ark streamed an error",
+                    details={
+                        "model": self._model,
+                        "upstream": json.dumps(body["error"], ensure_ascii=False)[:300],
+                    },
+                )
+
+            if body.get("model"):
+                model = str(body["model"])
+            if body.get("usage"):
+                usage_body = body["usage"]
+
+            choices = body.get("choices") or []
+            if not choices:
+                # 带 usage 的收尾块就是这种形状（choices 为空），不算「没有数据块」
+                continue
+
+            saw_chunk = True
+            delta = choices[0].get("delta") or {}
+            piece = delta.get("content")
+            if piece:
+                parts.append(piece)
+            elif delta.get("reasoning_content"):
+                # 模型内部推理。**刻意不拼进 content** —— 它是思考过程不是答案，
+                # 拼进去会污染交给 Pydantic 的 JSON。但要知道它在发生：
+                # 这是「这次为什么这么慢」的直接解释（实测出现过 300s 的推理期）
+                saw_reasoning = True
+
+        if not saw_chunk:
+            # 一个数据块都没有 = 响应结构不符预期。**绝不能静默返回空内容** ——
+            # 那会变成一个「Agent 输出校验失败」的假象，把排查方向指错
+            raise LLMTransportError(
+                "Ark returned an unexpected response shape (no streamed chunks)",
+                details={"url": self._url, "model": self._model},
+            )
+        if saw_reasoning:
+            logger.info("ark streamed reasoning_content before/among content | model=%s", model)
+
+        content = "".join(parts)
+        return LLMResponse(
+            content=content,
+            model=model,
+            usage=LLMUsage.from_openai_like(usage_body),
+            # raw 统一成非流式响应的形状：调用方与测试都按这个形状读全文，
+            # 「模型到底回了什么」要看得到
+            raw={
+                "model": model,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": content}}],
+                "usage": usage_body,
+            },
+        )
 
     @staticmethod
     def _map_error(response: httpx.Response) -> Exception:
@@ -151,25 +255,6 @@ class ArkLLMProvider(LLMProvider):
         return LLMTransportError(
             "Ark returned a server error",
             details={"status": status, "upstream": detail, "request_id": request_id},
-        )
-
-    def _parse(self, response: httpx.Response) -> LLMResponse:
-        try:
-            body = response.json()
-            content = body["choices"][0]["message"]["content"]
-        except (ValueError, KeyError, IndexError, TypeError) as exc:
-            # 结构不符预期。不回 200 让上层拿到空内容 —— 那会变成一个
-            # 「Agent 输出校验失败」的假象，把真正的问题指向错误的方向
-            raise LLMTransportError(
-                "Ark returned an unexpected response shape",
-                details={"body": response.text[:500]},
-            ) from exc
-
-        return LLMResponse(
-            content=content or "",
-            model=str(body.get("model") or self._model),
-            usage=LLMUsage.from_openai_like(body.get("usage")),
-            raw=body,
         )
 
     async def aclose(self) -> None:

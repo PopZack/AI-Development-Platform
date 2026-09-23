@@ -45,8 +45,18 @@ __all__ = [
     "build_tester_user_prompt",
 ]
 
-# 输出体量较大（实测 PRD 约 3400 completion tokens），给足上限
-_MAX_OUTPUT_TOKENS = 4096
+# ⚠️ 这里**刻意不发** max_tokens / max_completion_tokens。三件实测事实（2026-09-23，
+# 用 scripts/probe_llm_endpoint.py 量的）：
+#
+# 1. **``max_tokens`` 被端点忽略**：请求 60，实得 1426 个 completion token。
+#    所以原来那个 ``_MAX_OUTPUT_TOKENS = 4096`` 从来没生效过 —— 它是**假保证**，
+#    更糟的是它是个地雷：哪天端点开始遵守它，Developer 那种要写整份文件内容
+#    （实测 completion 18440）的调用会被硬切在 4096，直接退化成空/半截输出。
+# 2. **``max_completion_tokens`` 是生效的**，但**不能用来当护栏**：
+#    它把模型内部推理也计入预算，额度给低了推理就先耗光预算，
+#    结果是「200 + 内容 0 字符」—— 比超时更难查（看起来成功，其实什么都没回）。
+# 3. 真正该做的不是设上限，而是**把上限当可观测项**：agent_runs 已经记了
+#    prompt/completion/total tokens 与实际耗时，异常增长用告警看（见 README 部署小节）。
 
 
 def _json_contract(model: type[BaseModel]) -> str:
@@ -84,7 +94,6 @@ PRODUCT_SPEC = AgentSpec(
     ),
     output_model=Prd,
     temperature=0.2,
-    max_tokens=_MAX_OUTPUT_TOKENS,
 )
 
 
@@ -106,7 +115,6 @@ ARCHITECT_SPEC = AgentSpec(
     ),
     output_model=ArchitectureDesign,
     temperature=0.2,
-    max_tokens=_MAX_OUTPUT_TOKENS,
 )
 
 
@@ -164,7 +172,6 @@ DEVELOPER_SPEC = AgentSpec(
     ),
     output_model=DeveloperPatch,
     temperature=0.2,
-    max_tokens=_MAX_OUTPUT_TOKENS,
 )
 
 TESTER_SPEC = AgentSpec(
@@ -182,7 +189,6 @@ TESTER_SPEC = AgentSpec(
     ),
     output_model=TestReport,
     temperature=0.2,
-    max_tokens=_MAX_OUTPUT_TOKENS,
 )
 
 REVIEWER_SPEC = AgentSpec(
@@ -200,7 +206,6 @@ REVIEWER_SPEC = AgentSpec(
     ),
     output_model=ReviewFindings,
     temperature=0.2,
-    max_tokens=_MAX_OUTPUT_TOKENS,
 )
 
 
