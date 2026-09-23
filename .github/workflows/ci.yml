@@ -150,7 +150,8 @@ jobs:
           enable-cache: true
 
       - name: Generate a minimal .env (mock provider, random secrets)
-        # 值不回显；APP_ENV=dev 才允许 mock provider（prod 护栏会拒绝）
+        # 值不回显；APP_ENV 用 local（合法枚举 local/test/prod，没有 dev）——
+        # 非 prod 即允许 mock provider
         run: |
           uv run python - <<'PY'
           import secrets
@@ -158,7 +159,7 @@ jobs:
 
           block = "\n".join(
               [
-                  "APP_ENV=dev",
+                  "APP_ENV=local",
                   "LLM_PROVIDER=mock",
                   "LLM_API_KEY=ci-dummy-key",
                   "LLM_MODEL=ci-dummy-model",
