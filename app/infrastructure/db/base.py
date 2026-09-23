@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import JSON, DateTime, MetaData, Uuid, func
+from sqlalchemy.dialects import mysql
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -20,6 +21,7 @@ __all__ = [
     "Base",
     "UUIDPrimaryKeyMixin",
     "TimestampMixin",
+    "TimestampColumn",
     "JSONColumn",
     "utcnow",
 ]
@@ -52,14 +54,22 @@ class UUIDPrimaryKeyMixin:
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
 
 
+# 时间戳列统一用这个类型。
+# ⚠️ MySQL 的 ``DATETIME`` 默认精度是**秒**：ORM 里带微秒的 Python 值写进去会被
+# 四舍五入，于是「插入响应里的时间」与「重放时从库里读回的时间」口径漂移
+# （真 MySQL 上幂等重放用例实测踩到：08:24:28.826718 vs 08:24:29）。
+# fsp=6 让 MySQL 与 SQLite/PostgreSQL 一样保留微秒 —— 所有方言口径一致。
+TimestampColumn = DateTime().with_variant(mysql.DATETIME(fsp=6), "mysql")
+
+
 class TimestampMixin:
     """创建/更新时间。落库为 naive UTC。"""
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(), nullable=False, default=utcnow, server_default=func.now()
+        TimestampColumn, nullable=False, default=utcnow, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(), nullable=False, default=utcnow, onupdate=utcnow, server_default=func.now()
+        TimestampColumn, nullable=False, default=utcnow, onupdate=utcnow, server_default=func.now()
     )
 
 

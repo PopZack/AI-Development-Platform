@@ -16,7 +16,7 @@ import sqlalchemy as sa
 # （它只导入 sa 与 postgresql），于是迁移执行到那一行才 NameError，表建到一半就断。
 # **每次 autogenerate 之后都要回来检查这个导入。**
 from sqlalchemy import Text
-from sqlalchemy.dialects import postgresql
+from sqlalchemy.dialects import mysql, postgresql
 
 revision: str = '2100561906f6'
 down_revision: str | None = None
@@ -33,8 +33,8 @@ def upgrade() -> None:
     sa.Column('status', sa.String(length=32), nullable=False),
     sa.Column('token_version', sa.Integer(), server_default='0', nullable=False),
     sa.Column('id', sa.Uuid(), nullable=False),
-    sa.Column('created_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
+    sa.Column('created_at', mysql.DATETIME(fsp=6), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
+    sa.Column('updated_at', mysql.DATETIME(fsp=6), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_users'))
     )
     with op.batch_alter_table('users', schema=None) as batch_op:
@@ -48,8 +48,8 @@ def upgrade() -> None:
     sa.Column('owner_id', sa.Uuid(), nullable=False),
     sa.Column('status', sa.String(length=32), nullable=False),
     sa.Column('id', sa.Uuid(), nullable=False),
-    sa.Column('created_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
+    sa.Column('created_at', mysql.DATETIME(fsp=6), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
+    sa.Column('updated_at', mysql.DATETIME(fsp=6), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
     sa.ForeignKeyConstraint(['owner_id'], ['users.id'], name=op.f('fk_projects_owner_id_users'), ondelete='RESTRICT'),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_projects'))
     )
@@ -63,8 +63,8 @@ def upgrade() -> None:
     sa.Column('user_id', sa.Uuid(), nullable=False),
     sa.Column('role', sa.String(length=32), nullable=False),
     sa.Column('id', sa.Uuid(), nullable=False),
-    sa.Column('created_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
+    sa.Column('created_at', mysql.DATETIME(fsp=6), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
+    sa.Column('updated_at', mysql.DATETIME(fsp=6), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
     sa.ForeignKeyConstraint(['project_id'], ['projects.id'], name=op.f('fk_project_members_project_id_projects'), ondelete='CASCADE'),
     sa.ForeignKeyConstraint(['user_id'], ['users.id'], name=op.f('fk_project_members_user_id_users'), ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_project_members')),
@@ -85,8 +85,8 @@ def upgrade() -> None:
     sa.Column('created_by', sa.Uuid(), nullable=False),
     sa.Column('version', sa.Integer(), nullable=False),
     sa.Column('id', sa.Uuid(), nullable=False),
-    sa.Column('created_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
+    sa.Column('created_at', mysql.DATETIME(fsp=6), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
+    sa.Column('updated_at', mysql.DATETIME(fsp=6), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
     sa.ForeignKeyConstraint(['created_by'], ['users.id'], name=op.f('fk_requirements_created_by_users'), ondelete='RESTRICT'),
     sa.ForeignKeyConstraint(['project_id'], ['projects.id'], name=op.f('fk_requirements_project_id_projects'), ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_requirements'))
@@ -101,13 +101,13 @@ def upgrade() -> None:
     sa.Column('status', sa.String(length=32), nullable=False),
     sa.Column('current_step', sa.String(length=32), nullable=False),
     sa.Column('idempotency_key', sa.String(length=255), nullable=False),
-    sa.Column('started_at', sa.DateTime(), nullable=True),
-    sa.Column('finished_at', sa.DateTime(), nullable=True),
+    sa.Column('started_at', mysql.DATETIME(fsp=6), nullable=True),
+    sa.Column('finished_at', mysql.DATETIME(fsp=6), nullable=True),
     sa.Column('error_code', sa.String(length=64), nullable=True),
     sa.Column('error_message', sa.Text(), nullable=True),
     sa.Column('id', sa.Uuid(), nullable=False),
-    sa.Column('created_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
+    sa.Column('created_at', mysql.DATETIME(fsp=6), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
+    sa.Column('updated_at', mysql.DATETIME(fsp=6), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
     sa.ForeignKeyConstraint(['requirement_id'], ['requirements.id'], name=op.f('fk_workflow_runs_requirement_id_requirements'), ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_workflow_runs'))
     )
@@ -135,8 +135,8 @@ def upgrade() -> None:
     sa.Column('error_code', sa.String(length=64), nullable=True),
     sa.Column('error_message', sa.Text(), nullable=True),
     sa.Column('id', sa.Uuid(), nullable=False),
-    sa.Column('created_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
+    sa.Column('created_at', mysql.DATETIME(fsp=6), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
+    sa.Column('updated_at', mysql.DATETIME(fsp=6), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
     sa.ForeignKeyConstraint(['requirement_id'], ['requirements.id'], name=op.f('fk_agent_runs_requirement_id_requirements'), ondelete='CASCADE'),
     sa.ForeignKeyConstraint(['workflow_run_id'], ['workflow_runs.id'], name=op.f('fk_agent_runs_workflow_run_id_workflow_runs'), ondelete='SET NULL'),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_agent_runs'))
@@ -158,10 +158,10 @@ def upgrade() -> None:
     sa.Column('reviewed_by', sa.Uuid(), nullable=True),
     sa.Column('reason', sa.Text(), nullable=True),
     sa.Column('review_note', sa.Text(), nullable=True),
-    sa.Column('expires_at', sa.DateTime(), nullable=True),
+    sa.Column('expires_at', mysql.DATETIME(fsp=6), nullable=True),
     sa.Column('id', sa.Uuid(), nullable=False),
-    sa.Column('created_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
+    sa.Column('created_at', mysql.DATETIME(fsp=6), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
+    sa.Column('updated_at', mysql.DATETIME(fsp=6), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
     sa.ForeignKeyConstraint(['requested_by'], ['users.id'], name=op.f('fk_approvals_requested_by_users'), ondelete='SET NULL'),
     sa.ForeignKeyConstraint(['requirement_id'], ['requirements.id'], name=op.f('fk_approvals_requirement_id_requirements'), ondelete='CASCADE'),
     sa.ForeignKeyConstraint(['reviewed_by'], ['users.id'], name=op.f('fk_approvals_reviewed_by_users'), ondelete='SET NULL'),
@@ -181,8 +181,8 @@ def upgrade() -> None:
     sa.Column('version', sa.Integer(), nullable=False),
     sa.Column('content_json', sa.JSON(), nullable=False),
     sa.Column('id', sa.Uuid(), nullable=False),
-    sa.Column('created_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
+    sa.Column('created_at', mysql.DATETIME(fsp=6), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
+    sa.Column('updated_at', mysql.DATETIME(fsp=6), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
     sa.ForeignKeyConstraint(['agent_run_id'], ['agent_runs.id'], name=op.f('fk_artifacts_agent_run_id_agent_runs'), ondelete='SET NULL'),
     sa.ForeignKeyConstraint(['requirement_id'], ['requirements.id'], name=op.f('fk_artifacts_requirement_id_requirements'), ondelete='CASCADE'),
     sa.ForeignKeyConstraint(['workflow_run_id'], ['workflow_runs.id'], name=op.f('fk_artifacts_workflow_run_id_workflow_runs'), ondelete='SET NULL'),
@@ -206,8 +206,8 @@ def upgrade() -> None:
     sa.Column('error_message', sa.Text(), nullable=True),
     sa.Column('latency_ms', sa.Integer(), nullable=False),
     sa.Column('id', sa.Uuid(), nullable=False),
-    sa.Column('created_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
+    sa.Column('created_at', mysql.DATETIME(fsp=6), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
+    sa.Column('updated_at', mysql.DATETIME(fsp=6), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
     sa.ForeignKeyConstraint(['agent_run_id'], ['agent_runs.id'], name=op.f('fk_tool_calls_agent_run_id_agent_runs'), ondelete='SET NULL'),
     sa.ForeignKeyConstraint(['approval_id'], ['approvals.id'], name=op.f('fk_tool_calls_approval_id_approvals'), ondelete='SET NULL'),
     sa.ForeignKeyConstraint(['requirement_id'], ['requirements.id'], name=op.f('fk_tool_calls_requirement_id_requirements'), ondelete='SET NULL'),

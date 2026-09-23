@@ -52,8 +52,12 @@ class ArtifactRepository(BaseRepository[Artifact]):
         stmt = select(Artifact).where(Artifact.requirement_id == requirement_id)
         if artifact_type is not None:
             stmt = stmt.where(Artifact.type == artifact_type.value)
-        # 按版本升序：调用方看到的顺序和「第几版」一致
-        stmt = stmt.order_by(Artifact.version.asc(), Artifact.created_at.asc()).limit(limit).offset(offset)
+        # 按**创建时间**升序 —— version 是「同需求同类型内」的编号，
+        # PRD v1 和 PATCH v1 都是 1，拿它做第一排序键时顺序只能靠运气：
+        # 同一批交付物的 created_at 在 MySQL 上曾坍缩到同一秒
+        # （DATETIME 默认秒精度，见 base.py 的 TimestampColumn），顺序直接随机
+        # （真 MySQL 上 api 套件实测踩到）。时间为主、版本做并列时的次序才确定。
+        stmt = stmt.order_by(Artifact.created_at.asc(), Artifact.version.asc()).limit(limit).offset(offset)
         return list((await self.session.execute(stmt)).scalars().all())
 
     async def count_by_requirement(

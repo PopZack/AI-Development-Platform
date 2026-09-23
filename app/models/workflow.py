@@ -13,10 +13,10 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, Uuid
+from sqlalchemy import ForeignKey, String, Text, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.infrastructure.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.infrastructure.db.base import Base, TimestampColumn, TimestampMixin, UUIDPrimaryKeyMixin
 
 
 class WorkflowRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -38,8 +38,8 @@ class WorkflowRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # 真正兜底的是这个约束（Service 会捕获 IntegrityError 并返回已存在的那条）
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
 
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(TimestampColumn, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(TimestampColumn, nullable=True)
 
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

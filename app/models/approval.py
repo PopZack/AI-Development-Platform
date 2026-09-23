@@ -16,11 +16,11 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, Uuid
+from sqlalchemy import ForeignKey, String, Text, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, validates
 
 from app.domain.enums import ApprovalStatus
-from app.infrastructure.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.infrastructure.db.base import Base, TimestampColumn, TimestampMixin, UUIDPrimaryKeyMixin
 
 
 class Approval(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -64,7 +64,7 @@ class Approval(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(TimestampColumn, nullable=True)
 
     @validates("status")
     def _validate_status(self, _key: str, value: str) -> str:
