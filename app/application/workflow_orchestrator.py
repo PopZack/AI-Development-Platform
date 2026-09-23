@@ -120,6 +120,8 @@ class WorkflowOrchestrator:
         self._access = ProjectAccessGuard(session)
         self._provider = provider
         self._workspace_root = workspace_root
+        # 最近一次真实测试执行结果，写盘后立刻产出、测试阶段消费
+        self._last_execution: dict[str, Any] | None = None
 
     # ------------------------------------------------------------------ 启动
 
@@ -429,8 +431,22 @@ class WorkflowOrchestrator:
         ctx: ToolContext,
         changes: list[dict[str, str]],
     ) -> RunOutcome | None:
-        """写盘成功后的公共尾部：进测试 → 审查。返回 None 让调用方继续主循环。"""
-        _ = gateway, ctx, changes
+        """写盘成功后的公共尾部：**真实跑一次测试** → 进测试阶段。
+
+        真实执行（L3 run_pytest）刻意放在这里而不是交给 Tester Agent 自己决定：
+        Agent 没有工具调用能力（本项目刻意没做 tool-calling 循环），
+        而且「测试到底有没有通过」是客观事实，不该由模型口头说了算。
+        """
+        _ = changes
+        try:
+            execution = await gateway.execute("run_pytest", {"args": ["-q"]}, context=ctx)
+        except Exception as exc:  # noqa: BLE001 - 跑不起来不能阻断流程
+            # pytest 未安装 / 工作区里没有测试，都不该让整个工作流失败：
+            # 测试报告会如实写明「没有真实执行」，Tester 据此降级为静态核对
+            logger.warning("run_pytest unavailable | run=%s err=%s", run.id, exc)
+            execution = None
+        self._last_execution = execution
+
         self._transition(run, WorkflowStatus.TESTING)
         run.current_step = WorkflowStep.TESTER_AGENT.value
         await self._session.commit()
@@ -461,10 +477,17 @@ class WorkflowOrchestrator:
             run=run,
             phase="test",
         )
+        # 交付物里除了模型的结论，还带上**真实执行结果**：
+        # 「模型说通过」和「pytest 真的通过」是两件事，都要留痕
+        content = dict(outcome.parsed)
+        if self._last_execution is not None:
+            content["execution"] = {k: v for k, v in self._last_execution.items() if k != "output"} | {
+                "output_tail": (self._last_execution.get("output") or "")[-2000:]
+            }
         await self._save_artifact(
             requirement_id=run.requirement_id,
             artifact_type=ArtifactType.TEST_REPORT,
-            content=outcome.parsed,
+            content=content,
             agent_run_id=outcome.agent_run_id,
         )
         self._transition(run, WorkflowStatus.REVIEWING)

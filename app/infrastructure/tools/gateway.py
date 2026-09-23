@@ -35,6 +35,7 @@ from app.domain.approval import effective_status
 from app.domain.enums import ApprovalStatus, ToolCallStatus
 from app.domain.tool_levels import ToolAccessDecision, ToolLevel, decision_for
 from app.infrastructure.events import Event, get_event_bus
+from app.infrastructure.tools.exec_tools import EXEC_TOOLS
 from app.infrastructure.tools.patch_tools import PATCH_TOOLS
 from app.infrastructure.tools.paths import WorkspacePathValidator
 from app.infrastructure.tools.read_tools import READ_TOOLS, ToolDefinition, ToolRequest
@@ -73,7 +74,7 @@ class ToolGateway:
         self._workspace = WorkspacePathValidator(workspace_root)
         # 触发工具的用户：L4 工具被拦下时，审批记录要能追溯到「是谁要做的」
         self._requested_by = requested_by
-        self._tools: dict[str, ToolDefinition] = {t.name: t for t in (*READ_TOOLS, *PATCH_TOOLS)}
+        self._tools: dict[str, ToolDefinition] = {t.name: t for t in (*READ_TOOLS, *PATCH_TOOLS, *EXEC_TOOLS)}
 
     # ------------------------------------------------------------------ 注册
 

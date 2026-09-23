@@ -227,10 +227,16 @@ def build_developer_user_prompt(*, prd: dict, architecture: dict, workspace_file
     )
 
 
-def build_tester_user_prompt(*, prd: dict, architecture: dict, written_files: list[dict[str, str]]) -> str:
-    """Tester 的输入里必须有**文件内容**而不只是路径。
+def build_tester_user_prompt(
+    *,
+    prd: dict,
+    architecture: dict,
+    written_files: list[dict[str, str]],
+    execution: dict | None = None,
+) -> str:
+    """Tester 的输入里必须有**文件内容**而不只是路径，还要有真实执行结果。
 
-    第一轮真实模型验证暴露过这个问题：只给文件名清单时，Tester 的结论是
+    第一轮真实模型验证暴露过问题：只给文件名清单时，Tester 的结论是
     「未提供文件实际内容，无法判定」—— 一个上下文缺失造成的假阴性 fail。
     Tester 判的是代码，就必须看到代码；单文件截断上限防 Prompt 失控。
     """
@@ -255,8 +261,36 @@ def build_tester_user_prompt(*, prd: dict, architecture: dict, written_files: li
             "本次实际写入工作区的文件内容（这是写入时的最终内容，不是 diff）：",
             written,
             "",
+            _execution_block(execution),
             "请逐条核对验收标准并给出测试报告。",
         ]
+    )
+
+
+def _execution_block(execution: dict | None) -> str:
+    """真实 pytest 执行结果。
+
+    有它和没有它是两种质量：只给代码，Tester 只能「静态推演」，
+    判不出「测试其实没写对」这类问题；给了真实输出，哪些用例真的通过、
+    哪些收集时就错了，一目了然。没有执行结果（未装 pytest / 未写测试）
+    也要说清楚，而不是让模型以为「没提就是没问题」。
+    """
+    if not execution:
+        return "（本次没有真实执行测试 —— 请只做静态核对，并在 risks 里写明未能实际验证）"
+    if execution.get("timed_out"):
+        return (
+            f"真实 pytest 执行：**超时被终止**（{execution.get('timeout')}s），输出：\n"
+            f"```\n{execution.get('output', '')}\n```"
+        )
+    if execution.get("no_tests_collected"):
+        return (
+            "真实 pytest 执行：**没有收集到任何测试**（exit code 5）。"
+            "这通常说明测试文件没写对（命名/路径不符 pytest 约定）—— 请在报告里如实反映。"
+        )
+    verdict = "全部通过" if execution.get("passed") else "存在失败"
+    return (
+        f"真实 pytest 执行结果（exit code {execution.get('exit_code')}，{verdict}）：\n"
+        f"```\n{execution.get('output', '')}\n```"
     )
 
 

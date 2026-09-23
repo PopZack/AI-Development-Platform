@@ -904,6 +904,7 @@ function renderArtifactBody(artifact) {
           <span class="faint" style="font-size:12px">${(c.cases || []).filter((x) => x.passed).length}/${(c.cases || []).length} 用例通过</span>
         </div>
         <p class="muted" style="margin:0 0 12px">${esc(c.summary || "")}</p>
+        ${renderExecution(c.execution)}
         <div class="stack" style="gap:6px">
           ${(c.cases || [])
             .map(
@@ -940,6 +941,31 @@ function renderArtifactBody(artifact) {
     default:
       return `<pre class="code">${esc(JSON.stringify(c, null, 2))}</pre>`;
   }
+}
+
+/** 真实 pytest 执行结果。模型说通过 ≠ pytest 真的通过，两块都要显示。 */
+function renderExecution(execution) {
+  if (!execution) return "";
+  let label = "真实执行：全部通过";
+  let kind = "ok";
+  if (execution.timed_out) {
+    label = "真实执行：超时被终止";
+    kind = "warn";
+  } else if (execution.no_tests_collected) {
+    label = "真实执行：没有收集到测试（exit code 5）";
+    kind = "warn";
+  } else if (!execution.passed) {
+    label = `真实执行：存在失败（exit code ${execution.exit_code}）`;
+    kind = "bad";
+  }
+  return `
+    <div class="notice notice--${kind}" style="margin-bottom:12px">
+      <div class="spread">
+        <b>${esc(label)}</b>
+        <span class="mono faint" style="font-size:11.5px">${esc(execution.command || "pytest")}</span>
+      </div>
+      ${execution.output_tail ? `<pre class="code" style="margin-top:9px;max-height:220px">${esc(execution.output_tail)}</pre>` : ""}
+    </div>`;
 }
 
 function listBlock(title, items, kind) {

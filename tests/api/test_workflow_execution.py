@@ -181,6 +181,15 @@ async def test_full_loop_pauses_for_patch_approval_then_completes(
     arts = (await client.get(f"{API}/runs/{run['id']}/artifacts", headers=owner["headers"])).json()
     assert arts["total"] == 5
 
+    # 测试交付物里必须带**真实执行结果**（而不只是模型的结论）：
+    # 工作区里没有测试文件，所以真实结论是「没有收集到测试」——
+    # 这正是要留痕的东西：模型说通过 ≠ pytest 真的跑过
+    report = next(a for a in arts["items"] if a["type"] == "TEST_REPORT")
+    execution = report["content"].get("execution")
+    assert execution is not None, "TEST_REPORT 交付物缺少真实执行结果"
+    assert execution["no_tests_collected"] is True
+    assert execution["exit_code"] == 5
+
     # 最终批准 → COMPLETED
     done = await client.post(f"{API}/runs/{run['id']}/approve", headers=owner["headers"])
     assert done.status_code == 200, done.text
