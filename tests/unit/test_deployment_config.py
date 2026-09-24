@@ -316,9 +316,9 @@ async def test_require_redis_ping_failure_rejects_startup(
     """
     import pytest
 
+    import app.main as main_module
     from app.config.settings import Settings
     from app.main import create_app
-    import app.main as main_module
 
     class _UnreachableRedis:
         async def ping(self) -> None:
