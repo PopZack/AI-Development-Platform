@@ -35,9 +35,9 @@ flowchart LR
 
 ## 🖼️ 界面一览
 
-| 登录 | 需求详情 · 七步状态导轨 | 弹层表单 |
+| 登录 | 需求详情 · 七步状态导轨 | 项目详情 · 需求与成员 |
 |:---:|:---:|:---:|
-| ![登录](shots/01-login.png) | ![需求详情](shots/02-requirement.png) | ![弹层](shots/03-modal.png) |
+| ![登录](shots/01-login.png) | ![需求详情](shots/02-requirement.png) | ![项目详情](shots/03-project.png) |
 
 深空商务风单页应用，FastAPI 直接托管 —— 不用框架、不用构建步骤，`docker compose up` 即用。
 
