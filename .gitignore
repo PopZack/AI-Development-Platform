@@ -232,6 +232,3 @@ workspace/
 # 设计文档：本地参考资料，刻意不入版本库。
 # 不加这一行的话 git status 会一直显示 "?? design_docs/"，久了就没人看 status 了。
 design_docs/
-
-# 界面截图（本地验证产物，不属于代码资产）
-shots/
