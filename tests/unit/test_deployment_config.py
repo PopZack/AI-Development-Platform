@@ -305,21 +305,36 @@ def test_require_redis_rejects_missing_package(tmp_path: Path, monkeypatch: pyte
         create_app(settings)
 
 
-async def test_require_redis_ping_failure_rejects_startup(tmp_path: Path) -> None:
+async def test_require_redis_ping_failure_rejects_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """REQUIRE_REDIS=true 且 Redis 服务不可达 → lifespan 拒绝启动。
 
     redis-py 的连接是**惰性**的：客户端创建成功不代表服务可达，
-    所以必须真发一次 ping。用本机必然没有服务的高位端口模拟不可达。
+    所以必须真发一次 ping。用 fake 客户端（ping 必抛）而不是真连一个
+    死端口 —— 让测试与「环境里装没装 redis 包」无关（unit job 不装 extras）。
     """
     import pytest
 
     from app.config.settings import Settings
     from app.main import create_app
+    import app.main as main_module
 
+    class _UnreachableRedis:
+        async def ping(self) -> None:
+            raise ConnectionError("connection refused")
+
+        async def get(self, key: str) -> None:
+            return None  # 孤儿回收在 ping 之后才会跑到；防御性给上
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(main_module, "create_redis", lambda url: _UnreachableRedis())
     settings = Settings(
         app_env="test",
         require_redis=True,
-        redis_url="redis://127.0.0.1:6390/0",  # 本机无服务，连接立即被拒
+        redis_url="redis://127.0.0.1:6390/0",
         database_url=f"sqlite+aiosqlite:///{(tmp_path / 't.db').as_posix()}",
         workspace_root=str(tmp_path / "ws"),
         llm_provider="mock",
