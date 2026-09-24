@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     # 只作用于 LLM 的 HTTP 客户端，不影响其它接口的响应时间。
     llm_timeout_seconds: float = 180.0
     llm_max_retries: int = 2
+    # 慢调用告警阈值（秒）：单次调用耗时超过它就打 WARNING —— 让运维在
+    # 撞上 180s 超时**之前**看到「provider 正在变慢」的趋势。0 = 关闭。
+    # 阈值别写成断言（provider 延迟天然波动），它是告警不是测试
+    llm_slow_call_seconds: float = 60.0
 
     # ---------- 本地工作区（Stage 4 生效）----------
     # Tool Gateway 的授权根目录；所有文件工具路径必须规范化后落在它内部
@@ -88,6 +92,12 @@ class Settings(BaseSettings):
     # 多 worker 时不配 Redis 会出两个问题：限额被乘以 worker 数、
     # SSE 事件只在产生它的那个 worker 上可见。启动时会告警。
     redis_url: str = ""
+    # true 时 Redis 从「可选项」变成「硬要求」：没配 URL、包没装、ping 不通
+    # 三种情况**都拒绝启动**而不是降级告警。给「配了却不生效比不配更难查」
+    # 的部署形态用（compose 多人部署就是这种）；本地开发保持 false，
+    # 否则没装 redis 包就起不来。与「prod 拒绝默认密钥 / 拒绝 mock provider」
+    # 是同一条原则：部署形态声明的硬依赖，缺了就该在门口失败
+    require_redis: bool = False
     # SSE 心跳间隔：代理（nginx 默认 60s）会掐掉长时间无数据的连接
     sse_heartbeat_seconds: float = 15.0
 

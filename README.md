@@ -1047,9 +1047,31 @@ RuntimeError: 'cryptography' package is required for sha256_password or caching_
    （扫 `app/` 的所有顶层导入，逐个对照 `uv.lock` 里主依赖的**传递闭包**），
    以后再加依赖漏了会当场报错。
 
+### 启动自检与 Redis 硬依赖
+
+启动日志有一行**自检摘要**，配了没生效在这行里无所遁形：
+
+```
+AI Dev Team started | env=prod | db=mysql+aiomysql://aidev:***@db:3306/aidev | llm=ark/deepseek-v4-flash | events=redis | limits=llm 10/min, auth 20/min, default 300/min
+```
+
+- `events=in-process` 就是「Redis 没生效」（多 worker 下额度翻倍、SSE 时有时无）
+- 连接串已脱敏 —— 日志会被采集转发，密码不能进日志
+
+`REQUIRE_REDIS=true`（compose 里已设）把 Redis 从「可选项」变成「硬依赖」：
+没配 URL、包没装、ping 不通，**三种情况都拒绝启动**而不是降级告警 ——
+「配了却不生效」比启动失败更难查。redis-py 的连接是惰性的，
+所以启动时会真发一次 ping，而不是等第一个请求撞上。
+
+单次模型调用超过 `LLM_SLOW_CALL_SECONDS`（默认 60s，0 关闭）会打
+`slow llm call` WARNING —— provider 变慢的趋势信号，让人在撞上 180s
+超时**之前**有反应时间。它是告警不是失败判定：阈值写成断言会把
+provider 的正常波动变成故障。
+
 ### 上线前的检查清单
 
-- [ ] `JWT_SECRET_KEY` 换成真随机值（≥ 32 字节）。`APP_ENV=prod` 时配置层会拒绝默认值 ——
+- [ ] `JWT_SECRET_KEY` 换成真随机值（≥ 32 字节）。`APP_ENV=prod` 时配置层会拒绝默认值
+- [ ] compose 部署保持 `REQUIRE_REDIS=true`：Redis 连不上会拒绝启动而不是静默退化 ——
       **这条是真拦过人的**：`.env` 里留着默认占位值时，容器会起来又立刻崩，日志刷
       `ValidationError: JWT_SECRET_KEY is still the default value`
 - [ ] `DEBUG=false`。开着会把根 logger 降到 DEBUG，httpx / sqlalchemy 的内部细节

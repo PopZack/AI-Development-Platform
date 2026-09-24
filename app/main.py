@@ -73,6 +73,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("AUTO_CREATE_TABLES=false：表结构由 alembic 管理（alembic upgrade head）")
     await bus.start()
 
+    if settings.require_redis:
+        # redis-py 的连接是**惰性**的：客户端创建成功不代表服务可达。
+        # REQUIRE_REDIS=true 时必须真发一次 ping，否则「包装了但 Redis 没起」
+        # 要等到第一个请求撞上才暴露 —— 那不是「拒绝启动」该有的样子
+        if redis_client is None:
+            raise RuntimeError("REQUIRE_REDIS=true 但 Redis 客户端缺失（应在 create_app 阶段拦截）")
+        try:
+            await redis_client.ping()
+        except Exception as exc:
+            raise RuntimeError(
+                f"REQUIRE_REDIS=true 但 Redis 连接失败（ping）：{exc} —— "
+                "检查 Redis 服务是否可达、URL 与凭据是否正确"
+            ) from exc
+        logger.info("redis connectivity verified (REQUIRE_REDIS=true)")
+
     # 进程重启后把卡在执行中的运行标记为 FAILED/INTERRUPTED（别的 worker
     # 正在执行的会被运行锁跳过）
     await recover_orphaned_runs(
@@ -80,8 +95,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         redis=redis_client,
     )
 
+    # T10：一行自检让运维一眼看出当前形态 —— 配了没生效（比如 events 变成
+    # in-process、limits 变成 per-process）在这行里无所遁形
+    limits_summary = (
+        "disabled"
+        if not settings.rate_limit_enabled
+        else (
+            f"llm {settings.rate_limit_llm_per_minute}/min, "
+            f"auth {settings.rate_limit_auth_per_minute}/min, "
+            f"default {settings.rate_limit_default_per_minute}/min"
+        )
+    )
     logger.info(
-        "%s started | env=%s | db=%s | llm_provider=%s | events=%s",
+        "%s started | env=%s | db=%s | llm=%s/%s | events=%s | limits=%s",
         settings.app_name,
         settings.app_env,
         # ⚠️ 必须脱敏：连接串里带密码，而日志会被采集、转发、长期保存。
@@ -89,7 +115,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # 一旦接上日志收集就等于把库密码公布出去。
         mask_url(settings.database_url),
         llm_provider.name,
+        settings.llm_model or "(未设模型)",
         "redis" if redis_client is not None else "in-process",
+        limits_summary,
     )
     _warn_about_single_process_setup(settings, redis_client)
     try:
@@ -167,6 +195,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # Redis 可选：装了就用（多 worker 部署需要），没配就降级成单进程模式
     redis_client = create_redis(settings.redis_url)
+    if settings.require_redis and redis_client is None:
+        # T9：REQUIRE_REDIS=true 时 Redis 是硬依赖，缺了在门口失败而不是降级。
+        # 两种原因必须分开说 —— 「没配 URL」和「包没装」的修法完全不同
+        if not settings.redis_url.strip():
+            raise RuntimeError(
+                "REQUIRE_REDIS=true 但 REDIS_URL 未配置："
+                "要么设置 REDIS_URL，要么把 REQUIRE_REDIS 改回 false（单进程模式）"
+            )
+        raise RuntimeError(
+            "REQUIRE_REDIS=true 但 Redis 客户端创建失败 —— "
+            "大概率是 redis 包没装（uv sync --extra redis）。"
+            "配了却不生效比不配更难查，所以拒绝启动而不是降级"
+        )
     app.state.redis = redis_client
     bus = EventBus(redis=redis_client)
     app.state.event_bus = bus

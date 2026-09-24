@@ -69,13 +69,16 @@ class AgentService:
         provider: LLMProvider,
         *,
         max_output_attempts: int = 2,
+        slow_call_seconds: float = 60.0,
     ) -> None:
         self._session = session
         self._requirements = RequirementRepository(session)
         self._artifacts = ArtifactRepository(session)
         self._workflows = WorkflowRunRepository(session)
         self._access = ProjectAccessGuard(session)
-        self._runtime = AgentRuntime(session, provider, max_output_attempts=max_output_attempts)
+        self._runtime = AgentRuntime(
+            session, provider, max_output_attempts=max_output_attempts, slow_call_seconds=slow_call_seconds
+        )
 
     # ------------------------------------------------------------------ 分析
 

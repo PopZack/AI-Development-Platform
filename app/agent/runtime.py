@@ -96,10 +96,14 @@ class AgentRuntime:
         provider: LLMProvider,
         *,
         max_output_attempts: int = 2,
+        slow_call_seconds: float = 60.0,
     ) -> None:
         self._session = session
         self._provider = provider
         self._max_attempts = max(1, max_output_attempts)
+        # 慢调用告警阈值（秒），0 = 关闭。provider 延迟天然波动，这是**告警**
+        # 而不是失败判定：让运维在撞上 llm_timeout_seconds 之前看到变慢趋势
+        self._slow_call_seconds = max(0.0, slow_call_seconds)
         self._runs = AgentRunRepository(session)
 
     async def run(self, spec: AgentSpec, *, user_prompt: str, context: AgentContext) -> AgentOutcome:
@@ -163,6 +167,20 @@ class AgentRuntime:
                     response.usage.total_tokens,
                     latency_ms,
                 )
+                # T10 慢调用告警：provider 变慢（模型侧波动/排队）的趋势信号 ——
+                # 在撞上 llm_timeout_seconds 之前给人留出反应时间。
+                # 是告警不是断言：阈值写成失败判定会把正常波动变成故障
+                latency_s = latency_ms / 1000
+                if self._slow_call_seconds and latency_s >= self._slow_call_seconds:
+                    logger.warning(
+                        "slow llm call | role=%s exec=%s latency=%.1fs "
+                        "threshold=%.0fs tokens=%s —— provider 变慢的趋势信号，关注延迟与超时风险",
+                        spec.role,
+                        execution_id,
+                        latency_s,
+                        self._slow_call_seconds,
+                        response.usage.total_tokens,
+                    )
                 return AgentOutcome(
                     output=parsed,
                     raw_content=response.content,

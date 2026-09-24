@@ -116,7 +116,12 @@ def get_workflow_orchestrator(
     session: SessionDep, provider: LLMProviderDep, settings: SettingsDep
 ) -> WorkflowOrchestrator:
     # 工作区按需求分目录：req-<requirement_id>，互不串文件
-    return WorkflowOrchestrator(session, provider, workspace_root=Path(settings.workspace_root))
+    return WorkflowOrchestrator(
+        session,
+        provider,
+        workspace_root=Path(settings.workspace_root),
+        slow_call_seconds=settings.llm_slow_call_seconds,
+    )
 
 
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]

@@ -418,3 +418,109 @@ async def test_deleting_requirement_cascades_to_agent_runs_and_artifacts(
     artifacts = (await db_session.execute(select(func.count()).select_from(Artifact))).scalar_one()
     assert runs == 0
     assert artifacts == 0
+
+
+# ------------------------------------------------------------------ T10 慢调用告警
+
+
+async def test_slow_llm_call_warns(
+    db_session: AsyncSession, requirement_id: UUID, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T10：单次调用耗时超过阈值时打 WARNING —— 让运维在撞上超时**之前**
+    看到 provider 变慢的趋势。阈值是告警不是失败判定：调用本身照常成功。"""
+    import asyncio
+    import logging
+
+    runtime, provider = _runtime(
+        db_session, ['{"title": "实现 Todo API", "acceptance_criteria": ["可创建"]}'],
+        slow_call_seconds=0.01,
+    )
+    original = provider.complete
+
+    async def slow(request):  # noqa: ANN001 - 测试内包装
+        await asyncio.sleep(0.05)
+        return await original(request)
+
+    provider.complete = slow  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.WARNING):
+        outcome = await runtime.run(
+            _spec(), user_prompt="做一个待办接口", context=AgentContext(requirement_id=requirement_id)
+        )
+
+    assert isinstance(outcome.output, _Plan)  # 调用本身成功
+    slow_warnings = [r for r in caplog.records if "slow llm call" in r.message]
+    assert slow_warnings, "慢调用没有触发告警"
+    assert "PRODUCT" in slow_warnings[0].getMessage()
+
+
+async def test_fast_llm_call_does_not_warn(
+    db_session: AsyncSession, requirement_id: UUID, caplog: pytest.LogCaptureFixture
+) -> None:
+    """反例：耗时低于阈值不打扰 —— 告警只在有信息量时出现。"""
+    import logging
+
+    runtime, _ = _runtime(
+        db_session, ['{"title": "实现 Todo API", "acceptance_criteria": ["可创建"]}'],
+        slow_call_seconds=60.0,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await runtime.run(
+            _spec(), user_prompt="做一个待办接口", context=AgentContext(requirement_id=requirement_id)
+        )
+
+    assert not [r for r in caplog.records if "slow llm call" in r.message]
+
+
+# ------------------------------------------------------------------ T10 慢调用告警
+
+
+async def test_slow_llm_call_warns(
+    db_session: AsyncSession, requirement_id: UUID, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T10：单次调用耗时超过阈值时打 WARNING —— 让运维在撞上超时**之前**
+    看到 provider 变慢的趋势。阈值是告警不是失败判定：调用本身照常成功。"""
+    import asyncio
+    import logging
+
+    runtime, provider = _runtime(
+        db_session, ['{"title": "实现 Todo API", "acceptance_criteria": ["可创建"]}'],
+        slow_call_seconds=0.01,
+    )
+    original = provider.complete
+
+    async def slow(request):  # noqa: ANN001 - 测试内包装
+        await asyncio.sleep(0.05)
+        return await original(request)
+
+    provider.complete = slow  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.WARNING):
+        outcome = await runtime.run(
+            _spec(), user_prompt="做一个待办接口", context=AgentContext(requirement_id=requirement_id)
+        )
+
+    assert isinstance(outcome.output, _Plan)  # 调用本身成功
+    slow_warnings = [r for r in caplog.records if "slow llm call" in r.message]
+    assert slow_warnings, "慢调用没有触发告警"
+    assert "PRODUCT" in slow_warnings[0].getMessage()
+
+
+async def test_fast_llm_call_does_not_warn(
+    db_session: AsyncSession, requirement_id: UUID, caplog: pytest.LogCaptureFixture
+) -> None:
+    """反例：耗时低于阈值不打扰 —— 告警只在有信息量时出现。"""
+    import logging
+
+    runtime, _ = _runtime(
+        db_session, ['{"title": "实现 Todo API", "acceptance_criteria": ["可创建"]}'],
+        slow_call_seconds=60.0,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await runtime.run(
+            _spec(), user_prompt="做一个待办接口", context=AgentContext(requirement_id=requirement_id)
+        )
+
+    assert not [r for r in caplog.records if "slow llm call" in r.message]

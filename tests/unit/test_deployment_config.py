@@ -251,3 +251,134 @@ def test_pytest_is_a_runtime_dependency() -> None:
         "'No module named pytest'，真实测试执行功能失效。"
         "它必须放在 [project] dependencies（不是 dev 组、也不是 extra）。"
     )
+
+
+# ---------------------------------------------------------------- T9：REQUIRE_REDIS
+
+
+def test_require_redis_rejects_missing_url(tmp_path: Path) -> None:
+    """REQUIRE_REDIS=true 但没配 REDIS_URL → 拒绝启动，并说明两种出路。"""
+    import pytest
+
+    from app.config.settings import Settings
+    from app.main import create_app
+
+    settings = Settings(
+        app_env="test",
+        require_redis=True,
+        redis_url="",
+        database_url=f"sqlite+aiosqlite:///{(tmp_path / 't.db').as_posix()}",
+        workspace_root=str(tmp_path / "ws"),
+        llm_provider="mock",
+    )
+    with pytest.raises(RuntimeError, match="REDIS_URL 未配置"):
+        create_app(settings)
+
+
+def test_require_redis_rejects_missing_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """REQUIRE_REDIS=true 且配了 URL 但包没装（客户端创建失败）→ 拒绝启动。
+
+    这条对应真实事故：compose 配了 REDIS_URL 却没装 redis extra，
+    应用静默退化成进程内状态 —— REQUIRE_REDIS 就是让这种形态在门口失败。
+    """
+    import pytest
+
+    from app.config.settings import Settings
+    from app.main import create_app
+    import app.main as main_module
+
+    def _broken_create_redis(url: str) -> None:
+        return None  # 模拟「redis 包没装」时 create_redis 的返回
+
+    monkeypatch.setattr(main_module, "create_redis", _broken_create_redis)
+    settings = Settings(
+        app_env="test",
+        require_redis=True,
+        redis_url="redis://localhost:6379/0",
+        database_url=f"sqlite+aiosqlite:///{(tmp_path / 't.db').as_posix()}",
+        workspace_root=str(tmp_path / "ws"),
+        llm_provider="mock",
+    )
+    with pytest.raises(RuntimeError, match="redis 包没装"):
+        create_app(settings)
+
+
+async def test_require_redis_ping_failure_rejects_startup(tmp_path: Path) -> None:
+    """REQUIRE_REDIS=true 且 Redis 服务不可达 → lifespan 拒绝启动。
+
+    redis-py 的连接是**惰性**的：客户端创建成功不代表服务可达，
+    所以必须真发一次 ping。用本机必然没有服务的高位端口模拟不可达。
+    """
+    import pytest
+
+    from app.config.settings import Settings
+    from app.main import create_app
+
+    settings = Settings(
+        app_env="test",
+        require_redis=True,
+        redis_url="redis://127.0.0.1:6390/0",  # 本机无服务，连接立即被拒
+        database_url=f"sqlite+aiosqlite:///{(tmp_path / 't.db').as_posix()}",
+        workspace_root=str(tmp_path / "ws"),
+        llm_provider="mock",
+    )
+    app = create_app(settings)  # 客户端能创建（惰性），拦截发生在 lifespan
+    with pytest.raises(RuntimeError, match="Redis 连接失败"):
+        async with app.router.lifespan_context(app):
+            pass  # pragma: no cover - lifespan 在 ping 处抛出
+
+
+def test_require_redis_defaults_to_false() -> None:
+    """默认关闭：本地单进程开发不该因为没装 redis 包而起不来。"""
+    from app.config.settings import Settings
+
+    assert Settings().require_redis is False
+
+
+async def test_startup_log_contains_the_full_shape(tmp_path: Path) -> None:
+    """T10：启动自检一行看完形态 —— env / db 脱敏 / llm 供应商与模型 / events / 限流档位。
+
+    不能用 caplog：``create_app`` 里的 ``setup_logging`` 会**清空根 logger 的
+    全部 handler**（包括 pytest 挂的捕获 handler）—— 这是它作为应用入口的正当
+    行为。所以在 create_app 之后自己挂一个捕获 handler。
+    """
+    import logging
+
+    from app.config.settings import Settings
+    from app.main import create_app
+
+    settings = Settings(
+        app_env="test",
+        llm_provider="mock",
+        llm_model="test-model",
+        database_url=f"sqlite+aiosqlite:///{(tmp_path / 't.db').as_posix()}",
+        workspace_root=str(tmp_path / "ws"),
+        rate_limit_llm_per_minute=7,  # 非默认值：确认日志里是真实配置而不是写死的文案
+        rate_limit_auth_per_minute=9,
+        rate_limit_default_per_minute=11,
+    )
+    app = create_app(settings)
+
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Capture()
+    handler.setLevel(logging.INFO)
+    logging.getLogger().addHandler(handler)
+    try:
+        async with app.router.lifespan_context(app):
+            pass
+    finally:
+        logging.getLogger().removeHandler(handler)
+
+    started = [r for r in records if "started |" in r.message]
+    assert started, "启动自检日志缺失"
+    message = started[-1].getMessage()
+    assert "env=test" in message
+    assert "db=sqlite+aiosqlite://" in message  # SQLite 无凭据，原文可读
+    assert "llm=mock/test-model" in message
+    assert "events=in-process" in message
+    assert "limits=llm 7/min, auth 9/min, default 11/min" in message
