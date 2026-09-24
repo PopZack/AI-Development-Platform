@@ -1,1229 +1,359 @@
-# AI Dev Team ——  AI 软件开发团队协作平台
+<div align="center">
 
-用户提交一个软件开发需求，AI 团队依次完成需求分析、技术设计、代码变更、测试与审查，最后由人工确认结果。
+# 🤖 AI Dev Team
 
-> **当前进度：Stage 1（基础 API + 业务数据）已完成。**
-> 参见设计文档 §11 的分阶段实施计划。
+**把一条需求交给 AI 开发团队：分析 → 设计 → 写码 → 测试 → 审查 → 人工拍板**
 
----
+一个可本地部署的 AI 软件开发团队协作平台。AI 负责理解与生成，后端负责权限、状态、数据与工具边界 —— 模型再聪明，也不能越过审批去碰你的文件。
 
-## 这个项目要做什么（首期闭环）
+[![CI](https://github.com/PopZack/AI-Development-Platform/actions/workflows/ci.yml/badge.svg)](https://github.com/PopZack/AI-Development-Platform/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/Python-3.12+-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+![Tests](https://img.shields.io/badge/tests-397%20passed-brightgreen)
+![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
-```
-用户 → 注册/登录 → 创建项目 → 提交需求 → 创建工作流
-  → Product Agent(PRD) → Architect Agent(技术设计) → Developer Agent(变更计划/Patch)
-  → Tool Gateway → Tester Agent → Reviewer Agent → 人工审批 → 交付物归档
-```
-
-首期的代码变更只做「生成 Patch + 保存说明 + 路径校验」，**不做**任意 Shell 执行、
-自动 Git Push、自动部署。也就是说，它验证的是后端与 Agent 协作是否可靠，
-而不是让模型直连生产。
-
-核心原则（贯穿全部实现）：
-
-| 原则 | 落地方式 |
-|---|---|
-| AI 负责理解与生成，后端负责边界 | 权限、状态、数据、工具白名单全在后端 |
-| 不让 LLM 决定业务权限 | 工具调用一律过 Tool Gateway，模型只能「请求」 |
-| Agent 输出必须可验证 | 模型输出先过 Pydantic Schema 校验，不合格不落库 |
-| 事务与模型调用分离 | 先提交状态，再调外部服务，最后开新事务存结果 |
-| Router 不承载业务逻辑 | Router 只做请求校验 + 转交 Service |
-| 客户端不能改业务状态 | 状态只能由 Domain 规则推进，请求体里没有 status 字段 |
+</div>
 
 ---
 
-## 环境与依赖
+## ✨ 一条需求的完整旅程
 
-| 项 | 选择 |
-|---|---|
-| Python | 3.12+（开发环境实测 3.13） |
-| 包管理 | uv |
-| API | FastAPI |
-| ORM | SQLAlchemy 2.x（async + aiosqlite） |
-| 数据库 | SQLite（首期） |
-| 校验 | Pydantic 2.x |
-| 密码哈希 | Argon2 |
-| 测试 | pytest + pytest-asyncio + httpx |
-| 代码规范 | Ruff |
-| LLM | 火山方舟（通过 Provider 抽象接入，可替换） |
+```mermaid
+flowchart LR
+    U[👤 用户提需求] --> A[📊 Product Agent<br>PRD]
+    A --> B[📐 Architect Agent<br>技术设计]
+    B --> C[💻 Developer Agent<br>生成补丁]
+    C --> D{{🛑 补丁审批<br>OWNER 点头}}
+    D --> E[🧪 真实跑 pytest<br>Tester Agent 复核]
+    E --> F[🔍 Reviewer Agent<br>代码审查]
+    F --> G{{🛑 最终审批<br>OWNER 拍板}}
+    G --> H[✅ 应用补丁<br>交付物归档]
+    F -- 需要返工 --> C
+```
 
-### 本地启动
+启动一条工作流 **0.03 秒返回（202 异步受理）**，全程进展通过 SSE 实时推送到界面 —— 用户永远不用盯着转圈的按钮等模型跑完。
+
+## 🖼️ 界面一览
+
+| 登录 | 需求详情 · 七步状态导轨 | 弹层表单 |
+|:---:|:---:|:---:|
+| ![登录](shots/01-login.png) | ![需求详情](shots/02-requirement.png) | ![弹层](shots/03-modal.png) |
+
+深空商务风单页应用，FastAPI 直接托管 —— 不用框架、不用构建步骤，`docker compose up` 即用。
+
+## 🚀 快速开始
+
+**Docker（推荐，多人部署形态）：**
 
 ```bash
-uv sync                      # 安装依赖（含 dev 组）
-cp .env.example .env         # 按需修改配置
+git clone https://github.com/PopZack/AI-Development-Platform.git
+cd AI-Development-Platform
+cp .env.example .env        # 填 4 个值：JWT_SECRET_KEY / LLM_API_KEY / LLM_MODEL / MYSQL_PASSWORD
+docker compose up -d --build
+# 打开 http://localhost:8000/ui/
+```
+
+**本地开发：**
+
+```bash
+uv sync                     # 安装依赖
+cp .env.example .env
 uv run uvicorn app.main:app --reload
+# Swagger: http://127.0.0.1:8000/docs
 ```
 
-- Swagger：<http://127.0.0.1:8000/docs>
-- 健康检查：<http://127.0.0.1:8000/health>
-
-数据库与表在应用启动时自动创建（`data/ai_dev_team.db`）。**Alembic 迁移按设计文档
-§11 留到 Stage 5**，所以现在改表结构直接删掉本地 `data/` 重建即可。
-
-### 跑测试与规范检查
+**部署验收不用背清单，跑冒烟脚本：**
 
 ```bash
-uv run pytest              # 73 个用例
-uv run ruff check .        # lint
-uv run ruff format .       # 格式化
+python scripts/smoke_stack.py        # 起栈 → 10 项检查 → 拆栈，退出码非 0 即失败
 ```
 
----
+> LLM 通过 Provider 抽象接入，默认火山方舟（OpenAI 兼容协议，httpx 直连）。
+> 换供应商 = 新增一个实现类 + 改配置，Agent / Prompt / 校验层一行不动。
 
-## 分层结构
+## 🏗️ 架构
 
-```
-app/
-├── api/              Router：接收 HTTP、请求校验、响应转换
-│   ├── router.py     v1 路由汇总
-│   └── v1/           users / projects / requirements
-├── application/      Service：编排业务用例，持有事务边界
-├── domain/           实体状态机与不变量（不依赖 FastAPI / SQLAlchemy / LLM）
-├── repositories/     数据读写，不做业务判断
-├── models/           SQLAlchemy ORM 表映射
-├── schemas/          Pydantic 请求 / 响应模型
-├── infrastructure/   数据库、密码哈希、LLM Provider、工作区、工具
-├── agent/            Agent 角色与统一运行时（Stage 3）
-├── workflow/         显式工作流状态机与编排（Stage 4）
-└── common/           配置、异常、日志、request_id、DI
-```
-
-依赖方向单向：`api → application → domain / repositories → infrastructure`。
-判断标准很简单 —— **Domain 目录里不允许出现 `import fastapi` 或任何 LLM 客户端**。
-
-### 三个容易混的对象，刻意分开
-
-- **SQLAlchemy Model**（`app/models/`）：数据库表映射
-- **Domain 逻辑**（`app/domain/`）：业务状态与规则
-- **Pydantic Schema**（`app/schemas/`）：请求与响应校验
-
-小项目初期这三者结构相近，但不能合并成一个类，否则后面加权限和状态规则时会互相绊住。
-
----
-
-## 已实现接口
-
-统一前缀 `/api/v1`。
-
-### 认证（Stage 2）
-
-| Method | Path | 认证 | 说明 |
-|---|---|---|---|
-| POST | `/auth/register` | 否 | 注册。邮箱统一小写后落库 |
-| POST | `/auth/login` | 否 | 登录，返回访问令牌 |
-| GET | `/auth/me` | **是** | 当前用户 |
-| POST | `/auth/logout` | **是** | 登出，撤销该用户**全部**会话 |
-| POST | `/auth/password` | **是** | 改密码，并连带撤销全部会话 |
-
-### 项目与需求（Stage 2，已接资源级权限）
-
-| Method | Path | 要求 | 说明 |
-|---|---|---|---|
-| POST | `/projects` | 登录 | 创建者自动成为 Owner。**owner 取自令牌，请求体里没有这个字段** |
-| GET | `/projects` | 登录 | 只返回自己参与的项目。**没有**「查看别人列表」的开关 |
-| GET | `/projects/{id}` | 项目成员 | |
-| PATCH | `/projects/{id}` | **OWNER** | |
-| GET | `/projects/{id}/members` | 项目成员 | |
-| POST | `/projects/{id}/members` | **OWNER** | |
-| POST | `/projects/{id}/requirements` | **OWNER / DEVELOPER** | **created_by 取自令牌** |
-| GET | `/projects/{id}/requirements` | 项目成员 | |
-| GET | `/requirements/{id}` | 该需求所属项目的成员 | |
-| PATCH | `/requirements/{id}` | **OWNER / DEVELOPER** | 内容变更会使 version 自增 |
-
-### 用户（Stage 2，已接鉴权）
-
-| Method | Path | 要求 | 说明 |
-|---|---|---|---|
-| GET | `/users` | 登录 | 任何登录用户可见 —— 添加项目成员前要能查到对方 id |
-| GET | `/users/{id}` | 登录 | 同上 |
-| PATCH | `/users/{id}` | **仅本人** | 只能改 `display_name`；账号状态不属于自助修改范围 |
-
-不再有 `POST /users` —— 注册统一走 `/auth/register`。同一个业务动作保留两条入口，
-两边的校验规则迟早会走偏（比如一边统一小写邮箱、另一边忘了）。
-
-### 工作流（Stage 2，仅创建与查询）
-
-| Method | Path | 要求 | 说明 |
-|---|---|---|---|
-| POST | `/requirements/{id}/runs` | **OWNER / DEVELOPER** | 创建工作流，必须带 `Idempotency-Key` 头 |
-| GET | `/runs/{run_id}` | 该需求所属项目的成员 | 查询运行状态 |
-
-```http
-POST /api/v1/requirements/{requirement_id}/runs
-Idempotency-Key: requirement-001-v1
-Authorization: Bearer <access_token>
+```mermaid
+flowchart TB
+    subgraph client ["🌐 客户端"]
+        UI["Web UI（静态单页）<br>SSE 实时事件流"]
+    end
+    subgraph api ["API 层"]
+        R["Router：请求校验 + 转交，零业务逻辑"]
+    end
+    subgraph svc ["应用层"]
+        O["WorkflowOrchestrator<br>异步任务管理 · 202 受理 + 后台执行"]
+        S["业务 Service：事务边界 + 权限检查"]
+    end
+    subgraph core ["领域层"]
+        DM["状态机与不变量<br>（不 import fastapi / 任何 LLM 客户端）"]
+        TG["Tool Gateway<br>Agent 调工具的唯一入口"]
+    end
+    subgraph infra ["基础设施"]
+        DB[("MySQL / SQLite<br>Alembic 迁移")]
+        RD[("Redis<br>限流 + 事件广播 + 运行锁")]
+        LLM["LLM Provider 抽象<br>ark / mock 可插拔"]
+        WS[("隔离工作区")]
+    end
+    UI --> R --> S
+    S --> O --> TG
+    O --> LLM
+    S --> DM
+    TG --> WS
+    S --> DB
+    S --> RD
 ```
 
-响应约定：
+| 模块 | 职责 |
+|---|---|
+| `app/api` | Router 只做请求校验与转交 |
+| `app/application` | 业务用例编排，事务边界，异步后台任务 |
+| `app/domain` | 实体状态机与不变量 —— **不允许出现 `import fastapi` 或 LLM 客户端** |
+| `app/agent` | 五个 Agent 角色 + 统一运行时（调模型 → Pydantic 校验 → 落库） |
+| `app/workflow` | 显式工作流状态机 |
+| `app/infrastructure` | Tool Gateway、LLM Provider、限流、SSE、工作区 |
+
+数据模型 9 张核心表：`users` / `projects` / `project_members` / `requirements` / `workflow_runs` / `agent_runs` / `artifacts` / `approvals` / `tool_calls`。
+
+## 🛑 人工审批是流程的一部分，不是补充
+
+```mermaid
+stateDiagram-v2
+    [*] --> ANALYZING: start (202 异步)
+    ANALYZING --> PLANNING
+    PLANNING --> IMPLEMENTING
+    IMPLEMENTING --> 补丁审批: 停点① (IMPLEMENTING, TOOL_GATEWAY)
+    补丁审批 --> TESTING: OWNER 批准后 resume
+    TESTING --> REVIEWING: pytest 真实执行
+    REVIEWING --> REVISION_REQUIRED: 审查不通过（返工）
+    REVISION_REQUIRED --> IMPLEMENTING: resume，旧 PATCH 保留出 v2
+    REVIEWING --> 最终审批: 停点② (WAITING_APPROVAL, APPROVAL)
+    最终审批 --> COMPLETED: OWNER approve
+    最终审批 --> REJECTED: OWNER reject
+```
+
+- **Developer 可以启动工作流，但不能拍板** —— `approve` / `reject` 仅 OWNER，刻意的职责分离
+- **补丁先给人看，再写盘**：`generate_patch`（L2）只产出 diff → 自动发起审批 → OWNER 批准 → `apply_patch`（L4）才真正落盘；一条审批只能换一次成功执行（防重放）
+- **返工在同一 resume 请求内闭环**：审查打回 → 重新实现 → 新审批，旧补丁按版本保留
+- 运行/审批在界面上实时可见：事件流推送每一步状态迁移、交付物与审批卡片
+
+## 🛡️ 安全设计：模型被关在笼子里
+
+| 防线 | 做法 |
+|---|---|
+| **Tool Gateway 唯一入口** | L0 读上下文 / L1 读代码（记录）/ L2 生成补丁 / L3 跑测试（白名单）/ **L4 应用变更（需人工审批）** / L5 部署·删数据（禁止）。任何一个 Agent 自己 `open()` 文件，整套约束同时失效 —— 所以所有调用必须过同一道门 |
+| **模型输出必过校验** | 未通过 Pydantic Schema 的输出只留原文 + 报错，**绝不落库**；重试时把坏输出和校验错误一起发回去让模型改 |
+| **执行模型写的代码** | 只此一处（`run_pytest`）：固定解释器、参数白名单、cwd 锁定、剥离密钥环境变量、超时/输出上限。README 不把它说成强边界 —— 真隔离靠容器 |
+| **路径校验** | 解析为规范化路径后判断在授权根内，不用字符串前缀（`/workspace` 前缀匹配不了 `/workspace-evil` 的把戏） |
+| **会话撤销** | `token_version` 版本号比对，登出/改密立即踢掉全部令牌，零额外查询（鉴权本来就要读 users 行） |
+| **限流** | 三档：llm 10/min（最贵的资源）、auth 20/min 按 IP（反爆破）、default 300/min；限流键 = 令牌指纹；Redis 挂了 fail-open |
+| **生产护栏** | `APP_ENV=prod` 下默认 JWT 密钥 / Mock Provider / 空 API Key → **直接拒绝启动**，不带着占位配置安静地跑 |
+
+## 🧪 质量与验证
+
+| 维度 | 数字与事实 |
+|---|---|
+| 测试 | **397 个用例**三套件全绿；支持 `TEST_DATABASE_URL` 跑**真 MySQL**（每用例独立建库，全量 391s） |
+| CI | 四 job：lint+unit / **真 MySQL 8.4 service container**（先验证 Alembic 迁移）/ **生产镜像同依赖集合 import 冒烟** / 整栈冒烟（main + nightly） |
+| Agent 评估集 | mock 模式自测评估器 + real 模式量化，判给模型前先证明「评估器本身可信」；真实模型 **8/8 稳定通过**（每例 2 次） |
+| 真机验收 | MySQL 8.4 完整工作流 `COMPLETED`、Alembic vs create_all 零差异、中文/emoji 无损、跨实例事件经 Redis 送达 |
+| 注入验证 | 故意注入「坏迁移」「删 httpx」→ CI 三个 job 恰好各自红在对的步骤，防线真实有效 |
+
+CI 三道防线对应三类「**本地全绿、上线才炸**」：方言差异（SQLite 容忍、MySQL 炸）、依赖集合差异（dev 组有、镜像里没有）、失败方式差异（进程内假跑、容器真跑）。
+
+## 📡 API 一览
+
+统一前缀 `/api/v1`，统一错误格式（`code` / `message` / `request_id` / `details`），`request_id` 贯穿全链路日志。
+
+| Method | Path | 说明 |
+|---|---|---|
+| POST | `/auth/register` · `/auth/login` | 注册 / 登录（JWT） |
+| POST | `/projects` · `/projects/{id}/requirements` | 项目与需求（创建者自动 OWNER，**取自令牌**） |
+| POST | `/requirements/{id}/runs` | 创建工作流，**必须带 `Idempotency-Key`**（双击启动不会产生两条） |
+| POST | `/runs/{id}/start` · `/resume` | **202 异步受理**，执行在后台；事件流观察进展 |
+| POST | `/runs/{id}/approve` · `/reject` | 仅 OWNER |
+| POST | `/requirements/{id}/analyze` · `/plan` | 单独触发 PRD / 技术设计 |
+| GET | `/requirements/{id}/events` | SSE 实时事件流 |
+| GET | `/requirements/{id}/deliverables` | 交付物汇总：五类交付物最新版 + 工作区文件清单 |
+| GET | `/requirements/{id}/approvals` | 审批列表（也可被 409 响应自动创建） |
+
+<details>
+<summary><b>展开：幂等键与权限的完整语义</b></summary>
+
+**幂等键（创建工作流必须带）：**
 
 | 情况 | 状态码 | 说明 |
 |---|---|---|
 | 新建成功 | `201` | 返回这条工作流 |
-| 同一个键重放 | `200` | 响应头带 `Idempotent-Replay: true`，返回**当初那条**（不是新记录） |
-| 同一个键用在另一份需求 | `409` | `IDEMPOTENCY_KEY_CONFLICT` —— 这是客户端 bug，不是重试 |
-| 没带 `Idempotency-Key` | `422` | 不带就不给建，否则「双击启动」会安静地产生两条 |
+| 同键重放 | `200` + `Idempotent-Replay: true` | 返回**当初那条** |
+| 同键用于另一需求 | `409` `IDEMPOTENCY_KEY_CONFLICT` | 客户端 bug，不是重试 |
+| 不带键 | `422` | 「双击启动」会安静地产生两条，所以不给建 |
 
-**为什么幂等键是必须的而不是可选的**：创建工作流是「要么跑一次、要么重试」的操作。
-如果只靠应用层「先查再插」，并发下两个请求会同时读到「不存在」然后同时插入 ——
-真正兜底的是 `idempotency_key` 上的 UNIQUE 约束，Service 会捕获 `IntegrityError`
-并把已存在的那条读回来按重放返回（而不是把 500 抛给客户端）。
+为什么可靠：应用层「先查再插」在并发下会双双读到「不存在」，真正兜底的是数据库 UNIQUE 约束 —— Service 捕获 `IntegrityError` 后回读已存在那条，按重放返回而不是抛 500。
 
-**只创建、不执行**：新建的运行停在 `status=CREATED`、`current_step=PENDING`，
-`started_at` 为 `null`。执行用 `/runs/{id}/start`（见下节）。
+**权限模型（项目级，无全局管理员）：**
 
-> 文档 §6.3 给 `workflow_runs` 定义了 `status` 和 `current_step` 两个 NOT NULL 字段，
-> 但**没说它们的区别**。本项目的划分：`status` 是 §3.3 那台状态机（对外可见的阶段），
-> `current_step` 是该阶段内部正在等哪个环节（排障粒度，取值见 `WorkflowStep`）。
-
-### Agent 接口（Stage 3，会真的调模型）
-
-| Method | Path | 要求 | 说明 |
+| 角色 | 读 | 建/改需求 | 改项目·管成员 |
 |---|---|---|---|
-| POST | `/requirements/{id}/analyze` | **OWNER / DEVELOPER** | Product Agent 生成 PRD。状态 `DRAFT → ANALYZING` |
-| POST | `/requirements/{id}/plan` | **OWNER / DEVELOPER** | Architect Agent 生成技术设计。状态 `ANALYZING → DESIGNED`，**必须先 analyze** |
-| GET | `/requirements/{id}/artifacts` | 项目成员（含 VIEWER） | 列出交付物，按创建时间升序（同批内按版本），可用 `type` 过滤 |
-| GET | `/requirements/{id}/deliverables` | 项目成员（含 VIEWER） | **交付物汇总**：每种类型取最新版 + 工作区文件清单 + 最近一次工作流 |
+| OWNER | ✅ | ✅ | ✅ |
+| DEVELOPER | ✅ | ✅ | ❌ |
+| VIEWER | ✅ | ❌ | ❌ |
 
-**两个要提前知道的特性：**
+- 越权返回 **403 不伪装成 404**（UUID 不可枚举，帮助排查比藏资源存在性更有价值）；响应里带 `details.actual_role` / `required_roles`，前端不用靠猜
+- 令牌缺失/过期/篡改/撤销分别返回四个不同 code；对未认证调用方不暴露差异，避免提示攻击者差在哪一步
 
-- **慢**：同步接口，实测一次 20~40 秒（等模型返回）。文档 §13 的异步执行 + SSE 属 Stage 5。
-  因此 `LLM_TIMEOUT_SECONDS` 默认已调到 180 —— 60s 会超时（504），需求会被标成 `FAILED`。
-- **花钱**：每次几十到几千 token。VIEWER 能看结果但不能触发。
+</details>
 
-流程与失败语义：
+## 📈 实测数据（真模型、真端点）
 
-```
-DRAFT --analyze--> ANALYZING --plan--> DESIGNED
-                     ↑                  │
-                     └──── re-analyze ──┘   （需求改了要重跑）
-任意非终态 --失败--> FAILED --analyze--> （可恢复，不会永久锁死）
-```
-
-- 产出写两处：`artifacts`（按版本递增，保留历史）+ `requirements.prd_json`（当前版本快照）。
-  只有 PRD 有需求列可写；技术设计只落 `artifacts`，当前版本靠 version 最大的那条。
-- 模型输出未通过 Schema 校验（重试 2 次仍不行）→ 需求变 `FAILED` 并返回 502，
-  重新调用即可重试。**校验没过的内容绝不会写进交付物。**
-- `agent_runs` 刻意不通过 API 暴露：那是运维排障数据（每次尝试的原文、token、耗时、失败原因）。
-
-### 权限模型
-
-只有 **项目级** 角色，没有全局管理员（设计文档只定义了 Owner / Developer）：
-
-| 角色 | 读项目 | 读需求 | 建/改需求 | 改项目 · 管成员 |
-|---|---|---|---|---|
-| OWNER | ✅ | ✅ | ✅ | ✅ |
-| DEVELOPER | ✅ | ✅ | ✅ | ❌ 403 |
-| VIEWER | ✅ | ✅ | ❌ 403 | ❌ 403 |
-| 非成员 | ❌ 403 | ❌ 403 | ❌ 403 | ❌ 403 |
-
-两条值得说明的取舍：
-
-- **越权返回 403，不伪装成 404。** 项目 ID 是 UUID 不可枚举，泄露「资源存在」的风险很低，
-  而 403 对排查问题明显更有帮助。代价是调用方能区分「不存在」和「没权限」——
-  如果哪天 ID 变成可枚举的，应该改成对外 404。
-- **角色不足时，响应里带上实际角色和所需角色**（`details.actual_role` / `details.required_roles`）。
-  前端因此不用靠猜，也不用去翻文档 —— 文档会和代码走偏，报错不会。
-
-### 鉴权方式
-
-```http
-Authorization: Bearer <access_token>
-```
-
-令牌缺失、过期、被篡改、已被撤销分别返回 `AUTHENTICATION_REQUIRED` /
-`TOKEN_EXPIRED` / `TOKEN_INVALID` / `TOKEN_REVOKED` 四个不同的 code，
-客户端据此决定是「去登录」还是「报障」。这些差异不回给未认证的调用方（否则等于提示攻击者差在哪一步）。
-
-### 会话撤销（为什么 `/auth/logout` 不是空转）
-
-访问令牌是无状态 JWT，所以「登出」不可能是「删掉一条服务端会话记录」。
-本项目的做法是在 `users.token_version` 上留一个整数版本号：
-
-1. 签发令牌时，把当时的 `token_version` 写进载荷的 `ver`
-2. 每次鉴权比对令牌里的 `ver` 与用户当前的 `token_version`，不一致即拒（`TOKEN_REVOKED`）
-3. `/auth/logout` 和 `/auth/password` 都把 `token_version` 加一
-
-选它而不是「`jti` 黑名单表」的关键原因：**鉴权本来就要读 users 这一行**（判断账号状态、
-查项目成员关系），所以版本比对是零额外查询；黑名单方案则要给每个请求硬加一次查表或查 Redis，
-等于拿鉴权主链路的开销去换一个低频操作的能力。
-
-代价说清楚：**撤销粒度是「这个人的所有设备」**，做不到只踢掉某一台。要做单设备撤销需要改成
-服务端会话表（短过期 Access Token + Refresh Token），届时 `/auth/login`、`/auth/logout` 的
-路径与语义都不用变，只是把用户级撤销收紧成会话级。
-
-顺带拿到的一个真实收益：**改密码会自动把攻击者踢出去**，而不是等他手上的令牌自然过期。
-
-### 统一错误格式
-
-所有错误，无论是业务异常、参数校验失败还是未捕获异常，响应体结构一致：
-
-```json
-{
-  "error": {
-    "code": "REQUIREMENT_NOT_FOUND",
-    "message": "Requirement does not exist",
-    "request_id": "req-d65035a5e6e1",
-    "details": {}
-  }
-}
-```
-
-`request_id` 同时回写到响应头 `X-Request-ID`，全链路日志用同一个值串起来。
-内部堆栈只进日志，不进响应体。
-
----
-
-## LLM Provider 抽象（Stage 3）
-
-```
-app/infrastructure/llm/
-├── base.py      LLMProvider 抽象 + LLMMessage / LLMRequest / LLMResponse / LLMUsage
-├── errors.py    失败分类（关键：区分可重试 / 不可重试）
-├── retry.py     传输层重试（指数退避，只重试可恢复的失败）
-├── ark.py       火山方舟实现（唯一允许出现「方舟」的地方）
-├── mock.py      Mock 实现（测试替身，长期保留）
-└── factory.py   按 LLM_PROVIDER 装配 —— 全项目只有这里知道有哪些供应商
-```
-
-**Agent 层只依赖 `LLMProvider` 抽象，供应商 SDK 不渗透进去**（文档 §14.1）。
-换供应商 = 新增一个实现类 + 改配置，Agent / Prompt / 校验层一行不动。
-
-刻意**不引第三方 SDK**（openai / volcengine 等），只用 httpx：少一层依赖、
-少一处版本漂移，而且各家 SDK 的异常类型不统一，抽象层反而更难做得干净。
-Ark 的 `/api/v3/chat/completions` 本身就是 OpenAI 兼容协议。
-
-### 两类「重试」必须分清
-
-| | 传输层重试（`retry.py`） | 内容层重试（Stage 3 Agent Runtime） |
-|---|---|---|
-| 触发 | 网络抖动、连接被重置、5xx、429 | 模型回的内容不是合法 JSON / 不合 Schema |
-| 谁管 | 重试装饰器 | Agent Runtime |
-
-混成一个「最多重试 N 次」会很糟：模型稳定地回错误 JSON 时传输层白等三轮退避，
-而网络抖动时内容层又跑去重写 Prompt。**401 / 403 / 400 一次都不重试** ——
-它们重试一万次也一样失败，只会把真正的配置问题埋进重试日志里。
-
-**超时也一次都不重试**（2026-09-23 改的）。它和抖动是两件事：抖动是随机的，
-重试有意义；超时说明 provider 正在推理或排队，立刻重试等于**再压一份同样的负载**，
-而且大概率再超一次。实测代价是 `max_retries=2`（= 共试 3 次）让一个注定失败的
-Developer 请求白等 **540s** 才报错；改判之后最坏等待是 180s，快速失败，
-由调用方决定要不要挑更好的时机重来。
-
-### ⚠️ 火山方舟：三条路径，配错的表现是 401
-
-方舟至少有三条 base URL，**key 的权限范围是按路径划分的**。
-配错的表现是 `401 The API key or AK/SK in the request is missing or invalid.`
-—— **报错信息不会告诉你是端点配错了**，只会让你以为密钥无效。
-
-| | 平台端点 | Agent Plan | Coding Plan |
-|---|---|---|---|
-| Base URL | `.../api/v3` | `.../api/plan/v3` | `.../api/coding/v3` |
-| 模型名 | 带日期后缀，如 `deepseek-v4-flash-260425`；或自建接入点的 `ep-xxxx` | 短名，如 `deepseek-v4-flash` | 短名 |
-| Key | 平台 API Key（`ek-` 开头） | **Plan 专属 Key** | **另一个 Plan 专属 Key** |
-
-`llm_api_key` / `llm_base_url` / `llm_model` 三者必须配成**同一套**。
-
-本项目实测结论（2026-09-22，用同一个 Plan Key 打三条路径）：
-
-| 路径 | `deepseek-v4-flash` | `doubao-seed-2-1-pro` |
-|---|---|---|
-| `/api/plan/v3` | ✅ 200 | `404 does not support the agent plan feature` |
-| `/api/coding/v3` | `401`（key 不适用于这条 plan） | `404 does not support the coding plan feature` |
-| `/api/v3` | `401` | `401` |
-
-两条经验：
-
-- **一条 plan 只覆盖部分模型。** 换模型要重新确认它在不在当前 plan 里，
-  否则拿到的是 404 而不是「模型不存在」。
-- **`401` 不完全等于「密钥无效」。** 先确认 `LLM_BASE_URL` 与 key 属于同一条路径。
-  排查时最省事的做法是用同一个 key 打三条路径做对照 —— 403/404 会告诉你它认了哪条。
-
-### Mock Provider 为什么长期保留
-
-不是临时脚手架。有些分支用真实模型**根本没法稳定复现** —— 最典型的就是
-「模型返回了非法 JSON 时，系统必须拒绝而不是把半成品落库」（文档 §14.3）。
-你不可能靠反复真实调用来等模型输出坏 JSON。
-
-```python
-# 按脚本依次返回；脚本里可以混入异常，用来驱动重试与失败处理
-MockLLMProvider(script=[LLMTimeoutError("boom"), '{"title": "ok"}'])
-
-# 不传脚本 → 永远返回带醒目 _mock 标记的 JSON（本地手跑用，不会被误认成模型输出）
-MockLLMProvider()
-```
-
-脚本用完会**报错**而不是静默回落到默认内容 —— 否则「测试少写了一条响应」
-会变成一个看起来通过、其实没测到东西的用例。
-
-### Ark 实现怎么在没有有效密钥时测试
-
-`ArkLLMProvider` 支持注入 `transport`，所以能用 `httpx.MockTransport` 验证
-**「我们到底发出了什么请求」**（URL / 认证头 / 请求体字段）以及**各类失败被映射成哪一种错误**。
-Provider 抽象层最容易出的问题就是请求构造错了，而这类问题用真实调用只会看到一个
-笼统的 400/401，极难定位。
-
-密钥的**有效性与模型名归属**只能在真实调用里验证 —— 那是单独的连通性检查，不属于单元测试。
-
-### 生产环境护栏
-
-`APP_ENV=prod` 时，以下配置会让应用**直接启动失败**（而不是带着占位配置安静地跑）：
-
-- `JWT_SECRET_KEY` 仍是默认值，或短于 32 字节
-- `LLM_PROVIDER=mock`（生产上用 Mock 等于整个平台在演假戏，从响应上完全看不出来）
-- `LLM_API_KEY` / `LLM_MODEL` 为空
-
-本地/测试环境不受影响 —— 否则还没申请到密钥时开发会被拦死。
-
----
-
-## Agent Runtime（Stage 3）
-
-```
-app/agent/
-└── runtime.py   统一的「调模型 → 校验 → 落库」流程
-```
-
-**这个文件是设计文档 §14.3 那条硬线的落点**：
-
-> AI 负责理解、生成和分析；后端负责权限、状态、数据和工具边界。
-> 模型输出必须先通过 Pydantic 校验，不允许直接把模型输出写入数据库。
-
-流程：`Prompt 组装 → provider.complete(json_mode=True) → JSON 解析 → Pydantic 校验 → 落库`
-
-校验通过才写 `parsed_json`。**未通过校验的输出只留在 `output_json`（原文）+
-`error_message`（为什么不合格）里**，没有任何「先写进去再校验」的变体。
-
-### 内容层重试必须带上失败原因
-
-重试不是把同一个 Prompt 再发一遍 —— 那样只是赌模型这次心情好。第二次会把
-**上一次的原始输出**和**校验报错**一起发回去，让模型知道要改什么：
-
-```
-[system] 你是需求分析师…
-[user]   需求原文：…
-[assistant] {"priority": "P0"}                 ← 上一次的坏输出
-[user]   你上一次的输出没有通过校验：输出不符合 _Plan：[{...}]
-         请修正后重新输出。只输出一个符合 _Plan 结构的 JSON 对象。
-```
-
-这也是内容层重试**必须**和传输层重试分开的原因（见上文「两类重试必须分清」）。
-
-### agent_runs 的粒度（文档没定义，这是本项目的选择）
-
-**一行 = 一次 provider 调用**，不是「一次逻辑上的 Agent 执行」。
-
-理由：内容层重试的价值恰恰在于「第一次模型回了坏 JSON、第二次改好了」，而这个信息
-只有按次记录才能看到。一次执行只落一行的话，就只能看到最终结果，无法回答
-「它是一次就成功，还是重试了三次才勉强成功」。
-
-同一逻辑执行的多行共享 `execution_id`，`attempt` 从 1 递增。
-
-| 字段 | 含义 |
+| 指标 | 实测 |
 |---|---|
-| `execution_id` + `attempt` | 同一次执行的多次尝试可分组、可排序 |
-| `output_json` | 模型**原始输出**，不加工。排障必须能看到原文 |
-| `parsed_json` | **通过校验后**的结构化结果；`NULL` 表示没通过 |
-| `status` | `SUCCEEDED` / `INVALID_OUTPUT` / `FAILED` |
-| `model` | 记录**响应里**的 model。Provider 会把短名解析成具体 build（实测：请求 `deepseek-v4-flash`，返回 `deepseek-v4-flash-ga-260731`） |
-| `latency_ms` / `*_tokens` | 成本与性能排查 |
+| start/resume 响应 | **0.03s**（202 受理；同步时代用户阻塞 394s+） |
+| 完整工作流（真模型） | 停点① 196s → 停点② 301s → `COMPLETED`，5 份交付物，**用户阻塞时间 ≈ 0** |
+| Developer 单步 | 323s / 18.4k tokens（长推理）—— 所以请求必须**流式**，读超时从「总时长上限」变「块间隔上限」 |
+| 评估 | 真实模型 4 用例 × 2 次 **8/8 稳定** |
 
-`INVALID_OUTPUT` 与 `FAILED` 刻意分开：前者是**内容层**问题（模型不听话，值得重试或改
-Prompt），后者是**传输层**问题（网络、限流、凭据）。混成一个状态，就没法回答
-「这个 Agent 最近失败是因为模型不听话还是基础设施不稳」—— 两者处置方式完全不同。
+<details>
+<summary><b>展开：流式与超时的踩坑实录（为什么 <code>stream: True</code> 是硬要求）</b></summary>
 
-### 传输层失败不在 Runtime 里再重试
+- **`completion_tokens` ≠ 输出规模**：Developer 一次 18,440 completion token，落库正文只有约 4KB —— 差额是模型内部推理 token（端点下发 `reasoning_content`）。拿 completion 判「输出太长」会得出反向结论
+- httpx 的 timeout 是**读超时**（两块数据间最大间隔）。非流式下「整包算完才发第一个字节」→ 读超时退化成总时长上限，推理期可到 300s+ → **必然超时**；流式下块间隔亚秒级（实测首字节 1.0s、块间最大 0.8s）
+- **超时不重试**：抖动是随机的，重试有意义；超时说明 provider 在推理或排队，立刻重试 = 再压一份同样负载。实测 `max_retries=2` 让注定失败的请求白等 **540s**；改判后最坏等待 180s，快速失败
+- 端点行为用探针量，别推断（`scripts/probe_llm_endpoint.py`）：`max_tokens` 被**忽略**（要 60 实得 1426）→ 代码里任何输出上限都是假保证，已改为不下发；`max_completion_tokens` 生效但不能当护栏（把推理算进预算，额度低了回答直接变空串）
 
-Provider 抛出的网络/超时/限流错误已由 `RetryingLLMProvider` 处理过一轮。到这里还抛出来，
-说明重试也没救，直接记为 `FAILED` 并向上抛 —— 再套一层会让退避时间成倍叠加。
+</details>
 
----
+## 🧭 深度设计决策（为什么这么做）
 
-## 限流与实时事件（Stage 5：多人部署的前置条件）
+<details>
+<summary><b>LLM Provider：两类重试必须分清 + 方舟三条路径的坑</b></summary>
 
-### 限流
+- **传输层重试**（网络抖动/5xx/429，指数退避）与**内容层重试**（模型回了非法 JSON，带上坏输出与校验报错重写）混成一体会很糟：坏 JSON 时传输层白等三轮退避，网络抖动时内容层又去重写 Prompt
+- **401 / 403 / 400 一次都不重试** —— 它们重试一万次也一样失败
+- ⚠️ 火山方舟有三条 base URL（`/api/v3`、`/api/plan/v3`、`/api/coding/v3`），**key 按路径划分**，配错的表现是 401 且报错不提示端点问题。`llm_api_key` / `llm_base_url` / `llm_model` 必须配成同一套
+- 不引第三方 SDK，只用 httpx：少一层依赖漂移，各家 SDK 异常类型不统一反而让抽象层更难做干净
+- `agent_runs` 一行 = 一次 provider 调用（`execution_id` 共享、`attempt` 递增），`parsed_json` 只有通过校验才写；`INVALID_OUTPUT`（模型不听话）与 `FAILED`（基础设施不稳）刻意分开
 
-单人本地用时，限流只会碍事；**部署给多人用**是另一回事 —— 每个用户都能触发
-真实调模型的操作（一次 20~40 秒 + 花 token），一个手滑的循环就能把额度和机器打满。
+</details>
 
-| 档位 | 匹配 | 默认额度 | 为什么单独设 |
-|---|---|---|---|
-| `llm` | analyze / plan / start / resume | **10 / 分钟** | 最贵的资源 |
-| `auth` | login / register | 20 / 分钟（按 IP） | 反口令爆破 |
-| `default` | 其余接口 | 300 / 分钟 | 防脚本乱扫 |
+<details>
+<summary><b>异步执行：并发裁决、取消语义与崩溃恢复</b></summary>
 
-- **限流键 = 令牌指纹**（`sha256(token)` 前 16 位），匿名请求按 IP；
-  auth 档永远按 IP —— 爆破者每换一个假令牌就重置额度等于没限
-- 通过时也回 `X-RateLimit-Limit` / `X-RateLimit-Remaining`，撞墙时回 `429` +
-  `Retry-After`，错误体与其它接口一致（前端不需要为它写特例）
-- `/health`、`/docs`、`/ui` 静态资源不计流量 —— 探针要能高频打，静态资源不该占用户额度
-- **Redis 不可用时放行并告警**（fail-open）。限流是保护措施，让保护措施的故障
-  变成全站不可用是拿小风险换大风险；要更严就把 `RATE_LIMIT_FAIL_OPEN=false`
+- **start 并发裁决**：数据库原子认领（`UPDATE … WHERE status='CREATED'`），跨 worker 有效
+- **resume 并发裁决**：进程内注册表 + Redis 运行锁（TTL 90s、30s 心跳续期），撞锁 409 `WORKFLOW_RUN_BUSY`
+- **取消在步边界生效**：主循环每轮查真实状态，取消最多延迟一个步骤生效，而不是掐断进行中的模型调用
+- **崩溃不留僵尸**：进程重启时执行中的运行标记 `FAILED / INTERRUPTED`（活 worker 持锁的除外）；后台任务任何异常用独立会话兜底标 FAILED
+- 两个停点都用「合法状态 + 特定 `current_step`」表达，**没有新增状态**；`status` 是对外阶段、`current_step` 是阶段内环节（排障粒度）
 
-### 实时事件流（SSE）
+</details>
 
-```
-GET /api/v1/requirements/{id}/events    该需求的事件（SSE）
-GET /api/v1/events                      全局事件（审批提醒等）
-```
+<details>
+<summary><b>SSE 实现的两个必踩坑（都写进了代码注释与测试）</b></summary>
 
-事件类型：`workflow.created` / `workflow.status` / `artifact.created` /
-`approval.created` / `approval.decided`。
+1. **不要用 `asyncio.wait_for(anext(订阅), timeout)` 做心跳** —— 超时会取消取件协程并连带杀掉异步生成器，**第一次心跳后事件永不送达**。正确做法：取件任务常驻，只给「等待」加超时
+2. **不要调 `request.is_disconnected()`** —— 它不是非阻塞检查，测试传输下「等断线」变死锁。`StreamingResponse` 自己会取消断线的生成器
 
-- **为什么是 SSE 不是 WebSocket**：事件是单向的，用户操作本来就走 POST。
-  SSE 是纯 HTTP，鉴权、代理、日志全都沿用现成的一套
-- **认证支持两种**：`Authorization: Bearer`（推荐）或 `?token=`（浏览器
-  `EventSource` 带不了自定义头）。⚠️ query 传令牌会进访问日志和浏览器历史 ——
-  这是显式取舍，我们的前端用 fetch 流式读，走的是请求头那条路
-- **断点续传（Last-Event-ID）刻意没做**：事件是「看当前进展」的旁路数据，
-  权威状态在 `GET /runs/{id}`，重连后拉一次状态即可
-- **多 worker 需要 Redis**：否则事件只在产生它的那个 worker 上可见
+另：事件是单向旁路数据，权威状态在 `GET /runs/{id}`，所以**刻意不做**断点续传；反向代理记得关 `proxy_buffering`。
 
-实现里有两个必须记住的坑（都写进了代码注释和测试）：
+</details>
 
-1. **不要用 `asyncio.wait_for(anext(订阅), timeout)` 做心跳**。超时会取消取件协程
-   并把那个异步生成器一起杀掉 —— 于是**第一次心跳之后事件永远不再送达**。
-   正确做法是取件任务常驻、只给「等待」加超时。
-2. **不要调 `request.is_disconnected()`**。它不是非阻塞检查；在 ASGI 测试传输下
-   请求体读完就等响应结束，于是「等断线」变成死锁。Starlette 的
-   `StreamingResponse` 自己会取消断线的生成器，够用了。
+<details>
+<summary><b>数据库迁移与跨方言（Alembic、外键环、MySQL 才暴露的 bug）</b></summary>
 
----
+- **`create_all()` 只建缺失的表，不给已有表加列** —— 发新版本时静默失效，运行中报 `no such column`。生产 `AUTO_CREATE_TABLES=false`，结构一律走 Alembic
+- **外键环真机才炸**：`approvals ↔ tool_calls` 互相引用，SQLite 容忍、create_all 延后成 ALTER，只有 autogenerate 的内联外键迁移在 MySQL 直接 1824。修法是拆环 + 三个守卫用例（含「迁移建表顺序必须满足被引用表已存在」—— 唯一能不连 MySQL 就提前发现它的地方）
+- MySQL `DATETIME` 默认秒精度会把微秒四舍五入 → 时间戳列统一 `DATETIME(fsp=6)`；同类型记录排序第一键必须是 `created_at`（version 是类型内编号，无全局区分度）
+- `alembic.ini` 保持纯 ASCII（GBK locale 下中文注释让所有命令崩）；`env.py` 必须 `import app.models`（否则 autogenerate 生成删库迁移）
+- 跨方言守卫：把全部表的 CREATE TABLE 编译成 SQLite/MySQL/PG 三种方言断言通过 —— 不连真库就能抓到绝大多数类型不兼容
 
-## Tool Gateway（Stage 4）
+</details>
 
-```
-app/infrastructure/tools/
-├── paths.py       路径校验：解析为规范化路径后判断是否在授权根内
-├── read_tools.py  L1 工具的真实实现（list_files / read_file / search_code）
-└── gateway.py     唯一入口：查工具 → 权限判断 → 执行 → 落审计
-```
+<details>
+<summary><b>部署细节：依赖集合、镜像构建与「配了却不生效」</b></summary>
 
-**Gateway 是 Agent 调工具的唯一入口。** 权限分级、路径校验、「L1 允许并记录」
-三条约束，只有在所有调用都过同一道门时才成立 —— 任何一个 Agent 自己直接
-`open()` 文件，三条就同时失效，而且从代码上完全看不出来。
+- 部署依赖铁律：compose 配了 `REDIS_URL` 就必须装 `redis` extra（否则**静默退化**成进程内状态 —— 额度×worker 数、SSE 时有时无）；`mysql` extra 必须含 `cryptography`（MySQL 8 `caching_sha2_password`）。都固化成静态守卫用例
+- **`REQUIRE_REDIS=true` 把 Redis 从可选项变硬依赖**：URL 没配、包没装、ping 不通，三种情况都拒绝启动。redis-py 连接是惰性的，必须真 ping
+- 启动自检一行：`events=redis` 是 Redis 生效的唯一直接证据（看到 `in-process` 就是没配到位）；连接串脱敏进日志（有静态检查守着）
+- 镜像坑：不在 runtime 阶段 `apt-get install`（健康检查改用 urllib，省掉整个 apt 层）；「导入写了、依赖放 dev 组」会让镜像启动即崩（httpx 案）—— 静态检查扫 `app/` 顶层导入对照主依赖传递闭包
+- 国内拉不到 Docker Hub：从可用镜像源拉取后**打官方同名 tag**，compose 一字不改
+- 慢调用告警 `LLM_SLOW_CALL_SECONDS`：告警不是失败判定，阈值写成断言会把 provider 正常波动变成故障
 
-### 权限等级（文档 §14.1）
+</details>
 
-| 等级 | 含义 | 处置 |
-|---|---|---|
-| L0 | 读已授权上下文 | 允许 |
-| L1 | 读代码 · 搜索 | 允许，**并记录** |
-| L2 | 生成 Patch | 允许，要过路径与规则检查 |
-| L3 | 运行测试和有限命令 | 允许，白名单 |
-| L4 | 应用变更 | **需人工审批**（不是拒绝） |
-| L5 | 部署 · 删数据 · 改权限 | **首期禁止** |
+<details>
+<summary><b>Agent 评估集：先证明评估器可信，再谈模型表现</b></summary>
 
-**L4 不是「被拒绝」，而是「需要人点头」。** 两者混成一个 DENIED，工作流就没法在
-「等审批」这个状态停下来 —— 而人工审批恰恰是流程 B 里不可省略的一步。
-对应地 `tool_calls.status` 里 `APPROVAL_REQUIRED` 与 `DENIED` 是两个独立取值，
-审批流程要能从审计里筛出来，靠的就是这一条。
+- `mock` 模式回答「**评估器本身可信吗**」：预置的好输出必须全过、坏输出必须挂 —— 没有它，断言路径写错时 real 模式的低分会被误读成「模型不行」
+- 三条纪律：**必须有坏样本**（只有好样本，永远说没问题的模型能拿满分）；**断言必须可判定**（不接受主观打分）；**判断类任务必须重复跑**（`--repeat N`，单跑一次的分数不能当结论）
+- 「对照组必须 approved」是错的断言：严格的审查者总能找出成立的意见，该断言只奖励宽松。改成 `findings_substantiated` —— 打回可以，但每条 blocker/major 必须指明**文件 + 具体问题**
+- 一次真实评估中，模型连续四轮指出的反对意见**全部成立**（都是 fixture 的错）—— 顺带证明了审查者在真读代码
 
-### 工作流执行编排（Stage 4）
+</details>
 
-五个 Agent 被 `WorkflowOrchestrator` 串成完整闭环。幂等创建（上一节）之后：
+<details>
+<summary><b>已知取舍（不是遗漏，是选择）</b></summary>
 
-| Method | Path | 权限 | 说明 |
-|---|---|---|---|
-| POST | `/runs/{id}/start` | OWNER / DEVELOPER | **202 异步启动**：校验 + 数据库原子认领后立即返回，执行在后台 |
-| POST | `/runs/{id}/resume` | OWNER / DEVELOPER | **202 异步恢复**（同一运行已有后台任务时 409 `WORKFLOW_RUN_BUSY`） |
-| POST | `/runs/{id}/approve` | **仅 OWNER** | 最终人工批准 → `COMPLETED` |
-| POST | `/runs/{id}/reject` | **仅 OWNER** | 最终驳回（可 resume 返工） |
-| POST | `/runs/{id}/cancel` | OWNER / DEVELOPER | 取消（非终态且未 `APPROVED`） |
-| GET | `/runs/{id}/artifacts` | 项目成员 | 这条工作流产出的交付物 |
+- 扩展表只建了 `tool_calls`，`code_changes` / `test_runs` / `review_findings` / `audit_logs` 暂缓 —— 依据设计文档「不要为了完整的企业级表结构一次性实现所有表」，逐张理由见原决策记录
+- 任何登录用户可见全部用户邮箱（`GET /users`）—— 「添加项目成员」流程可用性的代价；对外部署应收紧或脱敏
+- 账号停用没有 API 入口 —— 设计文档没定义全局管理员，不凭空造一个
+- SSE 支持 `?token=` 给第三方集成（query 传令牌会进访问日志），自家前端用 fetch 流式读走请求头
+- L3 环境变量剥离是尽力而为不是边界；超时杀的是 pytest 进程本身 —— 真隔离靠容器级部署
 
-生命周期与两个停点：
+</details>
 
-```
-CREATED --start--> RUNNING --> ANALYZING --> PLANNING --> IMPLEMENTING
-                                                                │
-                     ┌── (IMPLEMENTING, TOOL_GATEWAY) ◄─────────┘   停点①：补丁审批
-                     │   OWNER 批准后 resume(approval_id)
-                     ▼
-                  TESTING --> REVIEWING ──needs_revision──► REVISION_REQUIRED
-                     passed                （resume 回到实现，旧 PATCH 保留出 v2）
-                     │
-                     ▼
-            (WAITING_APPROVAL, APPROVAL)                            停点②：最终审批
-              approve → APPROVED → COMPLETED
-              reject  → REJECTED ──resume──► 返工
-```
+<details>
+<summary><b>部署运维：上线检查清单与国内镜像源</b></summary>
 
-**两个停点都用「合法状态 + 特定 current_step」表达，没有新增状态。**
-§3.3 的迁移表只允许 `REVIEWING → WAITING_APPROVAL`，所以补丁审批暂停不借用这个状态
-—— 用 `current_step` 表达「阶段内卡在哪」本来就是它存在的意义（见上一节的划分）。
-响应里 `paused=true` + `pause_reason`（`tool_approval` / `final_approval`）直接告诉调用方在等什么。
+**上线前检查清单：**
 
-其他要点：
+- [ ] `JWT_SECRET_KEY` 换成真随机值（≥ 32 字节）；prod 下配置层拒绝默认值
+- [ ] `REQUIRE_REDIS=true`（compose 已设）：Redis 连不上拒绝启动而非静默退化
+- [ ] `DEBUG=false` —— 开着会把根 logger 降到 DEBUG，业务日志被内部细节淹没
+- [ ] `LLM_API_KEY` / `LLM_MODEL` / `LLM_BASE_URL` 配成**同一套**（方舟三条路径不通用）
+- [ ] 反向代理后开 `RATE_LIMIT_TRUST_PROXY=true`，且代理确实重写 `X-Forwarded-For`（否则客户端可伪造该头绕过限流）
+- [ ] SSE 路径关 `proxy_buffering`，否则事件被攒着不发
+- [ ] `WORKSPACE_ROOT` 落持久卷；挂 HTTPS；备份 `mysql_data` 与 `workspace` 卷
 
-- **REJECTED / REVISION_REQUIRED 的返工在 resume 的同一请求内闭环**：
-  回到实现 → 出新补丁 → 又停在新审批上。旧 PATCH 交付物按版本保留。
-- **Agent 失败 → 工作流 `FAILED`**，`error_code` / `error_message` 落在 run 上；
-  `agent_runs` 里有每次尝试的细节。
-- **Developer 不能做最终批准**（`approve` / `reject` 仅 OWNER）——
-  可以启动工作流但不能拍板，与工具审批的职责分离一致。
-- 主循环有步数护栏（12 步）：状态机最长合法路径约 8 步，超限说明推进逻辑有 bug，
-  快速失败而不是原地打转。
-
-### 补丁工具与审批闭环（L2 / L4）
-
-```
-1. generate_patch (L2)  只生成 unified diff，不写盘 —— 让人先看到要改什么
-2. apply_patch   (L4)   第一次调用不带 approval_id → 自动发起审批（409 返回 approval_id）
-3. OWNER 批准
-4. 再带 approval_id 重试 → 真正写盘
-5. 再试一次             → 403 APPROVAL_ALREADY_USED（一条审批只换一次成功执行）
-```
-
-`apply_patch` 的审批校验拆成四个独立错误码，调用方要能分辨「该怎么办」：
-
-| 错误码 | 含义 | 调用方该做什么 |
-|---|---|---|
-| `APPROVAL_NOT_APPROVED` | 还没批 / 已过期 | 等待或重新发起 |
-| `APPROVAL_TOOL_MISMATCH` | 批的是别的工具 | 重新发起 |
-| `APPROVAL_REQUIREMENT_MISMATCH` | 批的是别的需求 | 重新发起 |
-| `APPROVAL_ALREADY_USED` | 已经用过一次 | 确认结果，不要再试 |
-
-两个相关决定：
-
-- **`changes` 用「目标内容」而不是 diff 文本**：应用时直接写目标内容，不用解析 diff
-  （解析 diff 的边界情况多）；Agent 生成「这个文件最终长什么样」比生成
-  「怎么从 A 改到 B」更不容易出错。
-- **审批不是万能通行证**：路径校验在批准之后依然生效 —— 带着合法审批去写
-  工作区外的路径，照样被拒。
-
-### 人工审批（L4 的「人点头」）
-
-L4 工具被 Gateway 拦下时，**审批记录是自动创建的**（`PENDING`），
-`approval_id` 会随 `409 APPROVAL_REQUIRED` 的响应返回给调用方。
-没有「手动发起审批」的接口 —— 系统知道有个工具被拦了，人不需要替系统记这件事。
-
-| Method | Path | 权限 | 说明 |
-|---|---|---|---|
-| GET | `/requirements/{id}/approvals` | 项目成员 | 列表，可按 `status` 过滤 |
-| GET | `/approvals/{id}` | 项目成员 | 详情 |
-| POST | `/approvals/{id}/approve` | **仅 OWNER** | 批准 |
-| POST | `/approvals/{id}/reject` | **仅 OWNER** | 驳回 |
-
-规则：
-
-- **只有项目 OWNER 能批。** Developer 可以触发 Agent（也就可能触发 L4 工具），
-  但不能批自己的请求 —— 「我自己申请、我自己批准」等于没有审批。
-  这是刻意的职责分离。
-- **三个终态都不再有出边。** 批了又反悔要重新发起一次，历史必须原样保留。
-- **过期是惰性判定，不是后台任务。** 读取或审批时发现 `PENDING` 已到期，
-  先落成 `EXPIRED` 再拒绝。默认有效期 24 小时。
-- **L4 工具必须挂在需求上下文里调用。** 脱离需求的「批准」没有意义 ——
-  批的是「改这份需求的工作区」，不是「随便改点什么」。
-  越界调用返回 `403 APPROVAL_CONTEXT_REQUIRED`。
-
-### 真实测试执行（L3 `run_pytest`）
-
-写盘成功后编排器会**真实跑一次 pytest**，把输出喂给 Tester Agent：
-
-- 有真实输出和没有是两种质量。只给代码，Tester 只能「静态推演」，
-  判不出「测试写错了、根本没收集到用例」这类问题
-- 「模型说通过」和「pytest 真的通过」是两件事，所以测试交付物里
-  既存模型的结论，也存 `execution`（exit code / 是否超时 / 输出尾部）
-- ⚠️ **pytest 是运行时依赖**（写在 `[project] dependencies`，不是 dev 组）——
-  L3 用 `sys.executable -m pytest` 执行模型写的测试，放在 dev 组时镜像里
-  （`--no-dev`）没有它，执行只报 `No module named pytest`。容器里实测过这个
-  场景：Tester 如实判 fail、Reviewer 如实打回，而**模型改自己的代码永远
-  修不好环境缺包**，返工循环走不出去（同一个需求连打 5 轮 needs_revision）。
-  `app/` 从不 `import pytest`（它是子进程调用），所以 import 完整性检查
-  抓不到 —— 有专门的守卫用例 `test_pytest_is_a_runtime_dependency`
-- 同理，编排器**必须把执行结果传进 Tester 的 Prompt**。这里也断过线：
-  pytest 跑出 `12 passed`，Prompt 里却是「本次没有真实执行测试」的占位块，
-  Tester 如实照做判 fail。守卫是全流程测试里对 Mock Provider 收到的
-  Prompt 直接断言（`provider.calls[3]`），与交付物断言各盖一根线
-
-安全边界（这是本项目唯一会**执行模型写的代码**的地方）：
-
-| 措施 | 说明 |
-|---|---|
-| 不经过 shell | 固定 `sys.executable -m pytest`，不接受命令字符串 |
-| 参数白名单 | 只允许 `-q -v -x -s --tb=*--maxfail -k -m` 与相对路径；拒绝 `-p`/`--rootdir`/`-c`（它们能改插件加载与搜索根，等于绕开白名单） |
-| 路径 | 只允许相对路径，且显式拒绝绝对路径与 `..` |
-| 工作目录 | 固定为工作区根 |
-| 环境变量 | 继承系统变量但**按名字剥离疑似密钥**（`*KEY*`/`*TOKEN*`/`*SECRET*`/`*_URL`…） |
-| 资源 | 默认 60 秒超时（上限 300），输出上限 16KB（头尾各留一半） |
-
-两个踩过的坑：
-
-1. **只挡 `..` 不够**：`/etc/passwd` 既不含 `..`、也只由安全字符组成，但它是绝对路径 ——
-   必须单独挡开头 `/` 与盘符。
-2. **环境变量不能只给白名单**：一开始只传 PATH/PYTHONPATH，结果在 Windows 上
-   因为缺 `SystemRoot` 导致 Winsock 初始化失败（`WinError 10106`），**pytest 自己都拉不起来**。
-   正确做法是「继承 + 按名字剔除」。
-
-⚠️ 环境变量剥离是**尽力而为**，不是边界：名字起得古怪的密钥可能漏过去；
-真正的隔离要靠容器（见「部署」小节）。超时杀的是 pytest 进程本身，
-它派生的子进程在某些平台上可能存活 —— 这同样属于容器级隔离的范畴。
-
-### 路径校验：为什么不能用字符串前缀
-
-文档 §14.1 原文：*「路径校验必须解析为规范化路径后判断是否在授权工作区根内，
-不能用字符串前缀判断。」* 字符串前缀在这些情况会误判：
-
-- `/workspace` 前缀匹配 `/workspace-evil/x` —— 两个完全不同的目录
-- `/workspace/../etc/passwd` —— 前缀匹配，真实位置在 /etc
-- 符号链接 `/workspace/link` 指向 `/etc` —— 字符串看着在里面
-
-实现是 `(workspace_root / raw).resolve()` 之后 `is_relative_to(root)`，
-相对路径一律相对**授权根**解析（不是相对进程当前目录）。测试里有
-`workspace-evil` 这个真实反例。
-
-### 审计记录
-
-`tool_calls` 表记录**每一次**调用的四种结局：SUCCEEDED / FAILED / DENIED /
-APPROVAL_REQUIRED，含入参、结果摘要、错误码、耗时。
-
-- **完整输出不进库**，只存 500 字符摘要 —— 完整输出可能上千行，塞库既贵又没用
-- **审计在 Gateway 自己的事务里提交**，不跟外层业务事务走：
-  外层回滚时审计要留下来，出问题时你恰恰需要知道 Agent 做过什么
-
----
-
-## 数据库迁移与跨方言（Stage 5：部署给多人用）
-
-### 迁移用 Alembic，生产不要依赖 create_all
+**拉不到 Docker Hub 时（不改 compose）：** 从可用镜像源拉取后打官方同名 tag，`pull_policy: missing` 会直接用本地镜像：
 
 ```bash
-alembic upgrade head                                # 应用迁移
-alembic revision --autogenerate -m "add xxx"        # 改完模型后生成迁移
-alembic upgrade head --sql > migration.sql          # 只出 SQL（DBA 审阅 / 手工执行）
-```
-
-⚠️ **`create_all()` 只建缺失的表，不会给已有表加列。** 本地用着方便，但发新版本时
-它会**静默什么都不做**，然后应用在运行中报 `no such column` —— 看起来像代码 bug，
-实际是迁移漏了。所以生产设 `AUTO_CREATE_TABLES=false`，表结构一律走 Alembic。
-
-三个配置上的坑（都写在代码注释里了）：
-
-1. **`alembic.ini` 里不写 `sqlalchemy.url`**，由 `migrations/env.py` 从应用配置读。
-   两处各配一次必然漂移，而漂移的表现是「迁移跑在 A 库、应用连的是 B 库」。
-2. **`alembic.ini` 保持纯 ASCII**。Alembic 用**系统 locale 编码**读这个文件，
-   Windows + GBK 环境下任何中文注释都会让所有 alembic 命令报
-   `UnicodeDecodeError`。中文说明放在 `env.py`（Python 文件按 UTF-8 读）。
-3. **`env.py` 必须 `import app.models`**。`Base.metadata` 靠「模型被导入」才填充；
-   漏了这一步，autogenerate 会认为所有表都多余，生成一个把库删干净的迁移。
-
-autogenerate 也有一个固定坑：模型里的 `JSONB` 变体（PostgreSQL 用）会让它生成
-`postgresql.JSONB(astext_type=Text())` 却**不导入 `Text`**，迁移执行到那一行才
-`NameError`（表建到一半）。每次 autogenerate 之后都要检查导入。
-
-### 跨方言
-
-| 方言 | UUID 主键 | JSON 列 |
-|---|---|---|
-| PostgreSQL | 原生 `UUID` | `JSON`（模型里对 PG 用 `JSONB`） |
-| MySQL | `CHAR(32)` | 原生 `JSON` |
-| SQLite | `CHAR(32)` | `JSON`（实际是 TEXT） |
-
-`tests/unit/test_schema_portability.py` 把全部表的 `CREATE TABLE` 与索引**编译成
-三种方言**，断言都能编译通过、UUID/JSON 落地类型正确、没有 SQLite 专属写法
-（如 `AUTOINCREMENT`）漏到别的方言里。这不需要连真实数据库就能抓到绝大多数
-类型不兼容问题 —— 真机验证仍是部署时的验收步骤，但不该等到那时才发现。
-
-### 迁移与模型一致性验证（含真 MySQL 验收）
-
-验证手法：空库 A 跑 `alembic upgrade head`，空库 B 跑 `create_all()`，逐表比对表名、
-列定义与约束。不一致就说明迁移漏了改动。
-
-### 把测试套件跑在真 MySQL 上（CI 就是这么跑的）
-
-```bash
-TEST_DATABASE_URL='mysql+aiomysql://root:密码@127.0.0.1:3306/{dbname}?charset=utf8mb4' \
-    pytest tests/integration tests/api
-```
-
-不设 `TEST_DATABASE_URL` 时用 SQLite（每个用例一个临时文件库）。设了之后
-conftest 为**每个用例** `CREATE DATABASE` 一个独立库（毫秒级）、用完 `DROP` ——
-隔离语义与 SQLite 模式完全一致，不需要 TRUNCATE、不需要关外键检查。
-
-CI 的 `integration-and-api` job 就是这个模式（`mysql:8.4` service container），
-并且先跑 `alembic upgrade head` 验证迁移可执行 —— 外键环那类问题
-（SQLite 容忍、create_all 会延后环上的外键、只有迁移会炸）就是这条链路自动抓出来的。
-
-这条链路上线当天就抓到两个真问题（都已修复 + 守卫）：
-
-1. **MySQL 的 `DATETIME` 默认精度是秒** —— ORM 里带微秒的时间写进去被四舍五入，
-   「创建响应」与「重放读库」的 `created_at` 口径漂移（`08:24:28.826718` vs `08:24:29`）。
-   修：时间戳列统一 `DATETIME(fsp=6)`（`base.py` 的 `TimestampColumn`）。
-2. **交付物清单按 `version` 排序是错的** —— version 是「同类型内」的编号，
-   PRD/PATCH 都是 v1；时间戳坍缩到同一秒后顺序随机。
-   修：按创建时间排、版本做并列次序。
-
-2026-09-23 在**真 MySQL 8.4**（Docker）上完整验过一遍：
-
-| 检查 | 结果 |
-|---|---|
-| `alembic upgrade head` | ✅ 9 张表全部建成 |
-| 与 `create_all()` 建出的库比对 | ✅ 表名、列定义、约束**零差异** |
-| SQLite 上同样比对 | ✅ 一致 |
-| 完整工作流（注册 → 项目 → 需求 → 启动 → 补丁审批 → 恢复 → 最终批准） | ✅ `COMPLETED`，5 份交付物 |
-| 幂等重放、中文 + emoji 往返 | ✅ 200 + `Idempotent-Replay`；文本无损（utf8mb4） |
-| 类型落地 | UUID → `CHAR(32)`；JSON → 原生 `JSON` |
-
-这次真机验收抓到一个**只在 MySQL 上才暴露**的 bug，值得单独记：
-
-> **`approvals.tool_call_id → tool_calls` 与 `tool_calls.approval_id → approvals`
-> 互相引用，构成外键环。**
->
-> 后果不是「警告一下」：SQLAlchemy 的排序器遇到环会**放弃这两张表的依赖关系**
-> （只发一条 `SAWarning: Cannot correctly sort tables…`），于是 `approvals` 被排到
-> `users` 前面。而 ——
-> - SQLite 容忍前向引用 → 本地一切正常；
-> - `create_all()` 会把环上的外键**延后成 ALTER** → 直接建库也正常；
-> - **autogenerate 生成的迁移是内联外键的** → MySQL 直接
->   `(1824, "Failed to open the referenced table 'users'")`。
->
-> 修法是**拆环**：保留 `approvals.tool_call_id` 列（目前只读不写，纯追溯用），
-> 去掉这条外键；另一条 `tool_calls.approval_id` 不能动 —— 审批重放判定要查它。
-> 没用 `use_alter=True` 绕开的原因写在 `app/models/approval.py` 的注释里：
-> SQLite 不支持 ALTER 添加约束，那条路会让约束在 SQLite 上静默失效 ——
-> 声明了却不生效的约束，比不声明更危险。
->
-> 三个回归用例把这条路径封住了（`tests/unit/test_schema_portability.py`）：
-> 模型不许有外键环、SQLAlchemy 排序不许告警、**迁移的建表顺序必须满足
-> 「被引用的表已存在」**（最后一条是唯一能在没有 MySQL 的情况下提前发现它的地方）。
-> 三个用例都做过反向验证：把环放回去、打乱迁移顺序，用例确实报错。
-
----
-
-## 数据库
-
-首期核心表（已建）：`users`、`projects`、`project_members`、`requirements`、`workflow_runs`、`agent_runs`、`artifacts`
-
-按实现进度再增加：`approvals`（Stage 4），
-以及 `tool_calls`、`code_changes`、`test_runs`、`review_findings`、`audit_logs`。
-
-几条容易踩的约定：
-
-- **时间戳统一存 naive UTC**，API 出口补 `Z`。SQLite 不保存时区，若写入 aware datetime，
-  读回来变 naive，之后任何 aware/naive 比较都会抛 `TypeError`。
-- **邮箱落库前统一小写**，否则 `UNIQUE(email)` 挡不住大小写不同的重复注册。
-- **唯一约束是正确性保证，Service 里的查重只是友好提示** —— 并发下靠的是 DB 约束。
-- `prd_json` 在 Stage 3 之前必须保持为 `NULL`，绝不能写入未经 Schema 校验的模型输出。
-- **JWT 密钥必须 ≥ 32 字节**（RFC 7518 §3.2 对 HS256 的要求）。低于这个长度 PyJWT 会抛
-  `InsecureKeyLengthWarning`，而一堆黄色警告的后果不是「更安全」，是所有人都学会无视警告。
-  `APP_ENV=prod` 时密钥若仍是默认值或长度不足，应用会直接启动失败。
-
-### 改表结构怎么办
-
-首期没有 Alembic（按设计文档 §11 留到 Stage 5），建表靠 `Base.metadata.create_all()`。
-所以**改了 ORM 模型后，已存在的本地库不会自动跟着变**，需要二选一：
-
-- 删掉 `data/` 重建（开发阶段数据无所谓时）
-- 手工 `ALTER TABLE`（数据要留着时）。例如 Stage 2 给 users 加 `token_version`：
-  ```sql
-  ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0;
-  ```
-- 或者把 `DATABASE_URL` 指向一个新文件，旧库留着当参考
-
-这一步在接上 Alembic 之前是必须手动做的，忘了会看到 `no such column` 这类报错。
-
----
-
-## 分阶段计划
-
-| 阶段 | 目标 | 状态 |
-|---|---|---|
-| Stage 1 | 基础 API + 用户/项目/需求 CRUD + 统一错误 + pytest | ✅ 已完成 |
-| Stage 2 | JWT 认证、密码哈希接入、Owner/Developer 角色、资源级权限、幂等键 | ✅ 已完成 |
-| Stage 3 | LLM Provider 抽象、Product / Architect Agent、结构化输出校验、Agent Run 记录 | ✅ 已完成 |
-| Stage 4 | 工作流状态机、Developer / Tester / Reviewer、Tool Gateway、审批、交付物汇总 | ✅ 已完成（真实测试执行等按文档划入 Stage 5） |
-| Stage 5 | Redis 限流、SSE、真实测试执行、Alembic、MySQL 兼容、Web UI（可选增强） | ✅ 已完成（含容器化部署） |
-
----
-
-## Web UI（`/ui`）
-
-深空商务风格的单页应用，静态文件由 FastAPI 直接托管 —— **不用框架、不用构建步骤**，
-`docker compose up` 之后就能用。打开 `/` 会自动跳到 `/ui/`。
-
-覆盖的能力：登录注册、项目与成员、需求列表、需求详情（七步状态导轨、工作流操作、
-五个交付物标签页、审批卡片、工作区文件、**SSE 实时事件流**）。
-
-三条实现纪律（都在代码注释里）：
-
-1. **所有后端内容一律 escape 后再进 DOM**。PRD / 架构 / diff 都是模型生成的任意文本，
-   直接 `innerHTML` 等于给自己开一个 XSS
-2. **SSE 用 fetch 流式读，不用 `EventSource`** —— 后者带不了 `Authorization` 头，
-   只能把令牌放进 URL（进访问日志与浏览器历史）。接口仍保留 `?token=` 给第三方集成
-3. **长请求要有进度感**：start/resume 会真实调模型（20~40 秒），
-   界面显示进行中计时条而不是静默按钮
-
-界面截图（真实运行，非设计稿）：`shots/01-login.png`、`shots/02-requirement.png`。
-
-UI 验证抓到一个真问题：弹层表单字段多时，「创建」按钮被挤到折叠线以下 ——
-弹层整块滚动，用户得先滚动才点得到。已改成「头部固定 + 内容滚动 + 底部操作栏常驻」。
-
----
-
-## Agent 评估集（`evals/`）
-
-```bash
-uv run python scripts/eval_agents.py --provider mock                    # 评估器自测（毫秒级，可进 CI）
-uv run python scripts/eval_agents.py --provider real --repeat 2         # 真实模型（花钱、有方差）
-uv run python scripts/eval_agents.py --provider real --only review-clean --min-pass-rate 0
-```
-
-### 两种模式回答两个不同的问题
-
-| 模式 | 回答的问题 | 用真实模型 |
-|---|---|---|
-| `mock` | **评估器本身可信吗**（断言能不能区分好/坏输出） | 不用 |
-| `real` | **模型与 Prompt 现在表现如何** | 用 |
-
-`mock` 模式拿用例里预置的「正确输出 / 错误输出」喂断言引擎：前者必须全过，后者必须挂至少一条。
-这是评估器的自测 —— 没有它，评估器可能悄悄失效（断言路径写错、取到 `None` 却判通过），
-而 real 模式给出的低分会被误读成「模型不行」。`tests/unit/test_eval_assertions.py` 把它固化进了 CI。
-
-### 三条设计纪律
-
-1. **必须有坏样本。** 用例里成对出现「正确实现」与「注入缺陷的实现」（缺唯一性校验、
-   测试根本没收集到用例）。只有好样本的话，一个永远说「没问题」的模型能拿满分。
-2. **断言必须可判定。** 不接受主观打分：验收标准条数、是否含可验证要素、
-   是否出现「要保证数据一致性」这类空话、审查是否点出缺陷关键词。
-3. **判断类任务必须重复跑。** 同一输入实测出现过两次结论不同 ——
-   `--repeat N` 报告「n 次中通过几次」，逐用例标出「稳定通过 / 稳定失败 / 有波动」。
-   单跑一次的分数不能当结论。
-
-### 一次真实的评估过程（值得记录）
-
-首次用真实模型跑，4 个用例 3 个通过，被挂的正是「对照组」（无可争议的干净实现被判打回）。
-逐条看模型的反对意见 —— **四轮下来每一条都成立**，问题都在 fixture 而不是模型：
-
-| 轮次 | 模型指出的问题 | 结论 |
-|---|---|---|
-| v1 | 只有应用层预校验，并发下会写出重复行 | ✅ 成立，补库级唯一约束 |
-| v2 | diff 里出现字面量 `/n` | ✅ 成立（Git Bash heredoc 吃掉了反斜杠） |
-| v3 | diff 只截了 `upgrade()`，缺 `downgrade()` | ✅ 成立，补全 diff |
-| v4 | 迁移里用了 `text()` 却没导入；错误匹配只认 PostgreSQL 的约束名 | ✅ 成立（本项目真实迁移踩过同一个坑） |
-
-这个过程顺带证明了一件事：**审查者在真读代码，不是走流程**。
-
-同时也暴露了评估设计本身的问题：**「对照组必须 approved」是错的断言**。
-一个严格的审查者总能找出合理的改进点（现实里也确实有），断言 `approved` 只奖励宽松、
-不奖励严谨。已改成 `findings_substantiated` —— 打回可以，
-但每条 blocker / major 必须**指明具体文件与具体问题**。
-
-修完之后真实模型 **8/8 通过（每例 2 次，四个用例全部稳定）**。
-
----
-
-## 部署（多人使用）
-
-### 一条命令起一套
-
-```bash
-cp .env.example .env          # 填 JWT_SECRET_KEY / LLM_API_KEY / LLM_MODEL / MYSQL_PASSWORD
-docker compose up -d --build  # app(4 worker) + MySQL 8 + Redis
-# 打开 http://<主机>:8000/ui/
-```
-
-### 部署验收不用背清单：跑冒烟脚本
-
-```bash
-python scripts/smoke_stack.py             # 起栈 → 10 项检查 → 拆栈（退出码非 0 即失败）
-python scripts/smoke_stack.py --keep      # 检查完保留栈，方便排查
-```
-
-10 项检查对应部署时**真正踩过的坑**：`events=redis`（redis extra 未装会静默退化）、
-日志无 MySQL 密码明文、表数 == 模型表数 + alembic_version、`/health` 与 `/ui/`、
-注册 → 登录 → 项目 → 需求 → 工作流（含幂等重放）。CI 的 `smoke-stack` job
-（main push + 每日夜间）跑的就是它；「EXTRAS 漏掉 redis」注入时只有这一条检查变红
-—— 其余全部照常通过，这正是静默退化的可怕之处，也是它必须被断言的原因。
-
-镜像做了三件事：多阶段构建（uv 只在 builder 阶段）、非 root 运行、
-`tests/` 与 `.env` 都不进镜像（`.dockerignore`）。
-
-**实测结论**（2026-09-23，Docker Desktop 29.7.2，真 MySQL 8.4 + Redis 7）：
-
-```
-db / redis                        healthy
-app                               Up (healthy)，4 个 worker 各自启动
-启动日志                           env=prod | db=mysql+aiomysql://***@db:3306/aidev
-                                  | llm_provider=ark | events=redis
-alembic upgrade head              容器启动命令里先跑 → 9 张表建好
-/health、/ui/                     200
-注册/登录/项目/需求/创建工作流      全部正常
-容器内真实模型调用                 可用（PRODUCT / ARCHITECT 均成功返回）
-```
-
-`events=redis` 这一行值得每次确认：它说明 `redis` 包真的装上了、限流与事件广播
-走的是跨进程的 Redis 而不是进程内字典。**看到 `in-process` 就是部署没到位。**
-
-### 拉不到 Docker Hub 时怎么办（国内网络）
-
-`docker compose up --build` 很可能第一步就卡在
-`failed to resolve reference ... registry-1.docker.io`。**不用改 compose**：
-从可用镜像源拉下来、打上**官方同名 tag** 即可 —— compose 的默认
-`pull_policy: missing` 会直接用本地镜像，不会再去联网。
-
-```bash
-# 1) 先探哪个源可用（2026-09-23 本机实测：daocloud / 1panel 可用，1ms.run / rat.dev 不通）
-for m in docker.m.daocloud.io docker.1panel.live docker.1ms.run hub.rat.dev; do
-  printf '%-24s ' "$m"
-  docker manifest inspect "$m/library/mysql:8.4" >/dev/null 2>&1 && echo OK || echo FAIL
-done
-
-# 2) 用可用的源拉取，再打官方同名 tag
+# 先探哪个源可用（2026-09-23 实测：daocloud / 1panel 可用）
 docker pull docker.m.daocloud.io/library/mysql:8.4
 docker tag  docker.m.daocloud.io/library/mysql:8.4 mysql:8.4
 docker pull docker.m.daocloud.io/library/redis:7-alpine
 docker tag  docker.m.daocloud.io/library/redis:7-alpine redis:7-alpine
-# 构建应用镜像还需要基础镜像
 docker pull docker.m.daocloud.io/library/python:3.12-slim
 docker tag  docker.m.daocloud.io/library/python:3.12-slim python:3.12-slim
 ```
 
-两个容易忽略的点：
+**多人部署必须换掉的两样东西：** SQLite → MySQL/PG（单文件写锁扛不住并发写事务）；进程内限流/事件 → Redis（多 worker 不共享状态）。
 
-- **别改 compose 里的镜像名。** 改了本地能跑，但换到能正常联网的机器/CI 上反而要改回来。
-  打同名 tag 才是「本地兜底、配置不动」的解法。
-- **不是所有源都一起挂。** 本机实测 `registry-1.docker.io` 不通，但 `ghcr.io` 通 ——
-  所以 Dockerfile 里 `COPY --from=ghcr.io/astral-sh/uv:latest` 不受影响，
-  只有 `python:3.12-slim`（Docker Hub）需要走上面这步。遇到网络问题时，
-  先分别探一探 Docker Hub / ghcr.io / quay.io，别默认「全都不通」。
+</details>
 
-连镜像源都不可用时的退路，是在本地已有镜像里找同族底座、把源码下载到**宿主机**
-再 `COPY` 进去自行构建（容器内网络常与宿主机不同，别在容器里 `git clone`）——
-这属于应急手段，维护成本高，能拉到就别自建。
+## 📂 项目结构
 
-### 多人部署必须换掉的两样东西
+```
+AI-Development-Platform/
+├── app/                    # FastAPI 应用（api / application / domain / agent / workflow / infrastructure / common）
+├── web/                    # 深空商务风 Web UI（无框架无构建，FastAPI 托管 /ui）
+├── migrations/             # Alembic 迁移（跨方言）
+├── tests/                  # 397 用例：unit / integration / api（支持真 MySQL）
+├── evals/                  # Agent 评估集（mock 自测 / real 量化）
+├── scripts/                # 整栈冒烟 smoke_stack.py · LLM 端点探针 · 评估入口
+├── shots/                  # 界面截图（真实运行）
+└── docker-compose.yml      # app(4 worker) + MySQL 8 + Redis
+```
 
-| 本地 | 多人 | 为什么 |
+## 🗺️ 实施阶段
+
+| 阶段 | 内容 | 状态 |
 |---|---|---|
-| SQLite 单文件 | MySQL / PostgreSQL | SQLite 只有一个写锁，多人并发下「写事务排队」会直接暴露给用户 |
-| 进程内限流与事件广播 | Redis | 多 worker 下不共享状态：额度被乘以 worker 数、SSE 事件时有时无 |
+| Stage 1 | 基础 API + CRUD + 统一错误 | ✅ |
+| Stage 2 | JWT 认证 · 资源级权限 · 幂等键 | ✅ |
+| Stage 3 | LLM Provider 抽象 · Product/Architect Agent · 结构化输出校验 | ✅ |
+| Stage 4 | 工作流状态机 · Developer/Tester/Reviewer · Tool Gateway · 审批闭环 | ✅ |
+| Stage 5 | SSE · 限流 · Web UI · Alembic/MySQL · 容器化 · 评估集 · **异步执行** | ✅ |
 
-配了 `REDIS_URL` 之后限流与事件都会走 Redis（发布订阅 + `INCR` 计数）。
-**没配也不会起不来**，但启动日志会明确警告 —— 详见「限流与实时事件」小节。
+## License
 
-⚠️ **`redis` 是可选依赖，配了 `REDIS_URL` 不等于装上了它。** 这是个真踩过的坑：
-compose 一度只装 `--extra mysql`，于是镜像里没有 `redis` 包 ——
-应用不崩，只在启动日志里报一行错，然后**静默退化成进程内状态**，
-正好是「配 Redis 想避免」的那两个问题。两处修正：
-
-- compose 的构建参数改成 `EXTRAS: "mysql,redis"`
-- 启动检查不再把这种情况说成「REDIS_URL is not set」——**「配了却不生效」与「没配」
-  是两件事，报同一句话会让运维照着错误提示去查环境变量，永远查不出真因**。
-  现在这种情况以 error 级别明说「redis 包可能没装」
-
-### 数据库驱动也要装对（`cryptography`）
-
-`mysql` extra 里除了 `aiomysql` 还必须带 `cryptography`。MySQL 8 默认认证插件是
-`caching_sha2_password`，`PyMySQL`/`aiomysql` 处理它需要 `cryptography`，缺了直接抛：
-
-```
-RuntimeError: 'cryptography' package is required for sha256_password or caching_sha2_password
-```
-
-这个错在「装完依赖、第一次连库」时才出现，而 pyproject 最初只写了 `aiomysql` ——
-等于按文档装起来就连不上库。加在 extra 里（而不是写进 README 让人自己踩）才是修法。
-
-### 表结构用迁移，不要依赖 create_all
-
-`AUTO_CREATE_TABLES=false`（compose 里已设）+ 启动命令先跑 `alembic upgrade head`。
-原因见「数据库迁移与跨方言」小节：`create_all` 不给已有表加列，发版时会静默失效。
-
-### 镜像构建实测：两个只在构建/运行镜像时才会暴露的坑
-
-一次真实的 `docker compose up -d --build` 抓出来的，记在这里省得再走一遍：
-
-1. **不要在 runtime 阶段 `apt-get install`。** 原来为了健康检查装 `curl`，
-   而这一层在国内网络下经常直接失败：
-   `Failed to fetch http://deb.debian.org/debian/dists/trixie/main/binary-amd64/Packages 404`，
-   整个构建卡死在这里。**镜像里本来就有 Python** —— 健康检查改用 `urllib`
-   就够了，省掉整个 apt 层（镜像更小、构建不依赖 Debian 源）。
-2. **`uv sync --no-dev` 只装主依赖，所以「导入写了、依赖放在 dev 组」会让镜像启动即崩。**
-   构建成功、容器起来后立刻
-   `ModuleNotFoundError: No module named 'httpx'` —— 而 `app/infrastructure/llm/ark.py`
-   顶层就 import 它，等于「能调模型」这个核心能力在部署时直接没了。
-   开发机上 `uv sync` 带 dev 组，所以完全看不出来。
-   修法是把 `httpx` 放进主依赖；`tests/unit/test_deployment_config.py` 里加了一条静态检查
-   （扫 `app/` 的所有顶层导入，逐个对照 `uv.lock` 里主依赖的**传递闭包**），
-   以后再加依赖漏了会当场报错。
-
-### 启动自检与 Redis 硬依赖
-
-启动日志有一行**自检摘要**，配了没生效在这行里无所遁形：
-
-```
-AI Dev Team started | env=prod | db=mysql+aiomysql://aidev:***@db:3306/aidev | llm=ark/deepseek-v4-flash | events=redis | limits=llm 10/min, auth 20/min, default 300/min
-```
-
-- `events=in-process` 就是「Redis 没生效」（多 worker 下额度翻倍、SSE 时有时无）
-- 连接串已脱敏 —— 日志会被采集转发，密码不能进日志
-
-`REQUIRE_REDIS=true`（compose 里已设）把 Redis 从「可选项」变成「硬依赖」：
-没配 URL、包没装、ping 不通，**三种情况都拒绝启动**而不是降级告警 ——
-「配了却不生效」比启动失败更难查。redis-py 的连接是惰性的，
-所以启动时会真发一次 ping，而不是等第一个请求撞上。
-
-单次模型调用超过 `LLM_SLOW_CALL_SECONDS`（默认 60s，0 关闭）会打
-`slow llm call` WARNING —— provider 变慢的趋势信号，让人在撞上 180s
-超时**之前**有反应时间。它是告警不是失败判定：阈值写成断言会把
-provider 的正常波动变成故障。
-
-### 上线前的检查清单
-
-- [ ] `JWT_SECRET_KEY` 换成真随机值（≥ 32 字节）。`APP_ENV=prod` 时配置层会拒绝默认值
-- [ ] compose 部署保持 `REQUIRE_REDIS=true`：Redis 连不上会拒绝启动而不是静默退化 ——
-      **这条是真拦过人的**：`.env` 里留着默认占位值时，容器会起来又立刻崩，日志刷
-      `ValidationError: JWT_SECRET_KEY is still the default value`
-- [ ] `DEBUG=false`。开着会把根 logger 降到 DEBUG，httpx / sqlalchemy 的内部细节
-      灌满日志流，业务日志被淹没
-- [ ] `LLM_PROVIDER` 不是 `mock`（prod 下配置层直接拒绝启动）
-- [ ] `LLM_API_KEY` / `LLM_MODEL` 与 `LLM_BASE_URL` 是**同一套**（方舟的三条路径不能混用）
-- [ ] 反向代理后打开 `RATE_LIMIT_TRUST_PROXY=true`，**且代理确实会重写 `X-Forwarded-For`**
-      （直接暴露在公网时打开它，客户端可以伪造该头绕过限流）
-- [ ] `WORKSPACE_ROOT` 落在持久卷上（容器重建不该丢 Agent 写的代码）
-- [ ] 挂 HTTPS：令牌走 `Authorization` 头，明文 HTTP 等于把令牌公开
-- [ ] 备份 `mysql_data` 卷与 `workspace` 卷
-
-另外：启动日志里的连接串是**脱敏过**的（`mysql+aiomysql://***@db:3306/aidev`）。
-别改成打原串 —— 日志会被采集、转发、长期保存，多 worker 下每个 worker 各打一遍，
-等于把库密码公布出去。`tests/unit/test_security.py` 有一条静态检查守着这件事。
-
-### start/resume 是异步的：202 受理，进展走事件流
-
-`start` / `resume` 返回 **202 + 运行快照**，真实执行（多次模型调用，累计可达数分钟）
-在**后台任务**里进行 —— 用户不再阻塞等待。观察进展的两条路：
-
-- **事件流**（推荐）：`GET /requirements/{id}/events`，会依次收到
-  `workflow.status`（每一步状态迁移）、`artifact.created`（交付物）、
-  `approval.created`（补丁就绪，含 `approval_id`）
-- **轮询**：`GET /runs/{id}`，`(IMPLEMENTING, TOOL_GATEWAY)` 与
-  `(WAITING_APPROVAL, APPROVAL)` 是需要人工介入的停点
-
-背后的机制（`app/application/workflow_tasks.py`）：
-
-- **并发裁决**：start 靠数据库原子认领（`UPDATE … WHERE status='CREATED'`，
-  跨 worker 有效）；resume 靠「进程内注册表 + Redis 运行锁」（TTL 90s、30s 心跳续期），
-  撞锁返回 `409 WORKFLOW_RUN_BUSY`
-- **取消在步边界生效**：主循环每轮开始前查一次真实状态，发现 `CANCELLED` 即退出
-  —— 取消最多延迟一个步骤（一次模型调用）生效，而不是立即掐断进行中的调用
-- **崩溃不留僵尸**：进程重启时，卡在执行中的运行被标记 `FAILED / INTERRUPTED`
-  （持有运行锁的其它活 worker 正在执行的除外）
-- **后台任务兜底**：执行体任何非冲突异常都会用独立会话把运行标为 `FAILED`，
-  绝不让运行永久卡在执行中
-
-单次模型调用的耗时画像（2026-09-23，真端点）：
-
-| 角色 | prompt | completion | 实测耗时 |
-|---|---|---|---|
-| PRODUCT | 0.7~0.8k | 2~7.3k | 40~116s |
-| ARCHITECT | 1.4~1.6k | 2.1~7.0k | 25~59s |
-| **DEVELOPER** | 3.0k | **18.4k**（要给出整份文件内容） | **323s** |
-
-⚠️ **`completion_tokens` 不等于「输出规模」。** Developer 那次写了 18,440 个 completion
-token，而落库的 `output_json` 只有 3,976 字符（≈1.1k token）—— 差额是**模型内部的推理
-token**（这个端点会下发 `reasoning_content`）。拿 completion 去判「输出太长」会得出反向结论，
-我实际就这么误判过一次。
-
-**所以请求必须是流式的** —— `ark.py` 里的 `stream: True` 是硬要求，不是性能优化：
-
-- httpx 的 timeout 是**读超时**（两个数据块之间的最大间隔），不是整请求总时长；
-- 非流式下「服务端把整包算完才发第一个字节」→ 读超时退化成总时长上限，
-  而推理期实测可以到 300s+ → **必然超时**；重试只是把同样的长请求再压一遍
-  （`max_retries=2` 的含义是**共试 3 次**，实测白等 540s）；
-- 流式下块间隔是亚秒级（探针实测块间最大 **0.8s**、首字节 **1.0s**），同一个 timeout 值
-  含义完全不同；顺带把代理的超时问题也解了 —— `proxy_read_timeout` 同样是「无数据超时」，
-  数据持续流动就不会触发。
-
-超时也**不再重试**（它和网络抖动不是一回事，见 `errors.py` 的说明），
-后台执行里单步失败的最坏等待是 180s，之后运行变 `FAILED`（事件流可见）。
-
-另两条仍然成立：
-
-1. **SSE 那条路径要关掉 `proxy_buffering`**，否则事件会被攒着不发。
-2. **超时不是静默失败**：工作流变成 `FAILED` + `error_code=TIMEOUT`，
-   `error_message` 写明是 provider 超时，需求状态留在上一步（不会停在半路）。
-   异步之后没有 504 了 —— 客户端从事件流/轮询里看到失败，排障先看 `GET /runs/{id}`。
-
-反向代理的 `proxy_read_timeout` 对 start/resume 不再是敏感项（响应立即返回），
-对 SSE 仍然要关 `proxy_buffering`。
-
-#### 端点行为用探针量，别推断
-
-```bash
-uv run python scripts/probe_llm_endpoint.py          # 五个探针，1~5 分钟
-uv run python scripts/probe_llm_endpoint.py --full   # 用真实业务规模的长请求
-```
-
-它专量四件「推断容易错」的事。2026-09-23 对本项目端点的实测结果：
-
-| 量什么 | 实测 | 意味着 |
-|---|---|---|
-| 流式可用性、块间隔 | 首字节 1.0s、块间最大 0.8s | 长静默超时靠流式根治 |
-| `max_tokens` 是否生效 | **不生效**（要 60，实得 1426） | 代码里任何输出上限都是**假保证** |
-| `max_completion_tokens` | 生效，但**不能当护栏**（要 60 实得 60，内容 0 字符） | 它把推理也算进预算，额度给低了回答直接变空串 |
-| `response_format` 与流式共存 | 可用 | 改流式不会丢 `json_mode` |
-
-因此 Agent 的 `max_tokens` **刻意不再下发**（理由写在 `app/agent/roles.py` 的注释里）：
-它今天被忽略，哪天被遵守就会把长输出硬切掉 —— 那是个地雷。
-成本护栏改用可观测性：`agent_runs` 已经记了 prompt/completion/total tokens 与实际耗时。
-
-### 关于「执行模型写的代码」
-
-`run_pytest`（L3）会真实执行工作区里的测试代码。已做的隔离：
-固定可执行文件、参数白名单、cwd 锁定工作区、剥离环境变量中的疑似密钥、超时与输出上限。
-**这些都不是强边界** —— 真要跑不受信任的代码，请把工作区放进独立容器/沙箱
-（只读挂载宿主、断网、限制 CPU/内存），这是部署层的选择，本项目只保证不给你添乱。
-
----
-
-## 开工前需要拍板的几件事
-
-1. **设计文档自身存在若干矛盾**，实现时已在代码里做了收敛，但文档还没同步：
-   - §3.3 的状态机图含 `REJECTED` / `REVISION_REQUIRED`，但状态表没列这两个状态
-     → 已在 `app/domain/enums.py` 补齐。
-   - `REVIEWING` 缺少回到 `IMPLEMENTING` 的路径，而 §12.7 示例里 Reviewer 输出的正是
-     `needs_revision` → 已在 `app/domain/workflow.py` 补上 `REVIEWING → REVISION_REQUIRED`。
-   - §10 的目录结构里 ORM Model 出现两处（`app/models/`、`app/infrastructure/db/models.py`）
-     → 采用 `app/models/`。
-   - §10 结构含 `alembic.ini` + `migrations/`，但 §11 把 Alembic 划到 Stage 5
-     → 首期用 `Base.metadata.create_all()` 建表。
-   - `projects` / `workflow_runs` 缺 `created_at` / `updated_at`，与 `users` / `requirements`
-     不一致 → 所有核心表统一审计字段。
-   - `approvals.tool_call_id` 指向 `tool_calls`，而后者被划进「首期扩展表」，首期存在悬空外键。
-   - `/auth/logout` 在无状态 Access Token 下语义悬空，Stage 2 需要明确会话撤销策略
-     → 已用 `users.token_version` 解决（见上文「会话撤销」）。
-2. **`requirements.status` 的取值集合文档未定义**（只在 §12.1 出现过一次 `DRAFT`）。
-   已拆成 `RequirementStatus`（需求自身生命周期）与 `WorkflowStatus`（§3.3 的完整状态机）两个枚举。
-3. **`requirements` 的 ORM Model 位置、密码哈希算法（Argon2 vs bcrypt）** 等细节在文档里
-   是二选一或缺失的，当前实现选择写在代码注释里。
-
----
-
-## 已知取舍（不是遗漏，是选择）
-
-### 首期扩展表：只建了 `tool_calls`，其余四张暂缓
-
-文档 §6.1 的原话：「在工具执行和测试闭环实现时增加相关记录表。
-不要为了“完整的企业级表结构”而一次性实现所有表。」按这个原则逐张核对：
-
-| 表 | 决定 | 理由 |
-|---|---|---|
-| `tool_calls` | ✅ 已建 | 工具执行已实现，审计是权限模型的一部分（L1「允许并记录」） |
-| `code_changes` | 暂缓 | PATCH 交付物已完整记录变更内容 + diff，`tool_calls` 有应用结果；
-  独立表在只有单次补丁语义时是纯重复。等出现「多次补丁累积成工作区状态」的需求再建 |
-| `test_runs` | 暂缓 | 文档把「真实的测试工具执行」划入 Stage 5 —— Tester 现在做的是静态核对，
-  没有真实运行就没有运行结果可记，建表只会得到一张永远空着的表 |
-| `review_findings` | 暂缓 | findings 已结构化存在 REVIEW 交付物 JSON 里；跨需求聚合查询（如「最近所有
-  blocker」）出现时再抽表，从 JSON 迁移是机械劳动 |
-| `audit_logs` | 暂缓 | 工具级审计已由 `tool_calls` 覆盖；审批有自己的记录（approvals）。
-  全局操作审计等到有真实合规需求再加 |
-
-### 其它取舍
-
-- **任何登录用户都能看到全部用户的邮箱**（`GET /users`）。这是为了让「添加项目成员」
-  这条流程可用 —— 你得先能查到那个人的 id。在本地协作平台里可接受；若要对外，
-  应收紧成「只能看到与你有共同项目的人」，或对其他人的 `email` 做脱敏。
-- **账号停用（`UserStatus.DISABLED`）没有 API 入口**。设计文档只定义了项目级角色
-  （Owner / Developer），没有全局管理员，所以不凭空造一个。`ACCOUNT_DISABLED` 分支
-  保留在认证层（手工改库或将来有管理功能时立刻生效），测试通过直连改库构造该状态。
-- **越权返回 403 而非 404**。理由见上文「权限模型」。
+[Apache-2.0](LICENSE)
