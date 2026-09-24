@@ -23,6 +23,8 @@ import re
 import tomllib
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = ROOT / "docker-compose.yml"
 
@@ -283,9 +285,9 @@ def test_require_redis_rejects_missing_package(tmp_path: Path, monkeypatch: pyte
     """
     import pytest
 
+    import app.main as main_module
     from app.config.settings import Settings
     from app.main import create_app
-    import app.main as main_module
 
     def _broken_create_redis(url: str) -> None:
         return None  # 模拟「redis 包没装」时 create_redis 的返回
