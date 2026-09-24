@@ -188,6 +188,37 @@ async function longTask(label, fn) {
   }
 }
 
+/**
+ * 轮询运行状态直到停点（需要人）或终态。
+ *
+ * start/resume 现在是 202 异步：HTTP 响应只代表「已受理」。实时细节由 SSE
+ * 事件流补充（workflow.status / approval.created），这里轮询的是权威状态。
+ * 取消在步边界生效 —— 取消后下一次轮询就会看到 CANCELLED 并返回。
+ */
+const SETTLE_POLL_MS = 2000;
+const SETTLE_TIMEOUT_MS = 40 * 60 * 1000; // 真模型多轮返工的上限，给足余量
+
+async function waitForRunToSettle(runId) {
+  const deadline = Date.now() + SETTLE_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, SETTLE_POLL_MS));
+    let run;
+    try {
+      run = await api("GET", `/runs/${runId}`);
+    } catch (err) {
+      if (String(err.message || "").includes("登录已过期")) throw err;
+      continue; // 网络抖动：下一轮再试，不中断等待
+    }
+    state.run = { ...(state.run || {}), ...run };
+    const settled =
+      ["COMPLETED", "FAILED", "CANCELLED", "REJECTED", "REVISION_REQUIRED", "WAITING_APPROVAL"].includes(
+        run.status,
+      ) || (run.status === "IMPLEMENTING" && run.current_step === "TOOL_GATEWAY");
+    if (settled) return run;
+  }
+  throw new Error("后台执行超过 40 分钟未到达停点，请刷新页面查看最新状态");
+}
+
 /* ------------------------------------------------------------------ 登录 */
 
 function renderLogin() {
@@ -1234,11 +1265,13 @@ document.addEventListener("click", async (event) => {
       }
       case "start-run": {
         const runId = state.run.id;
-        const result = await longTask("工作流执行中", () =>
-          api("POST", `/runs/${runId}/start`),
-        );
-        state.run = result.run;
-        announceRun(result);
+        // 202 = 已受理，执行在后台。轮询等它停到「需要人」或终态
+        const run = await longTask("已提交后台执行", async () => {
+          state.run = await api("POST", `/runs/${runId}/start`);
+          await waitForRunToSettle(runId);
+          return state.run;
+        });
+        announceRun(run);
         await refreshRequirement();
         break;
       }
@@ -1250,11 +1283,16 @@ document.addEventListener("click", async (event) => {
           .filter((a) => a.tool_name === "apply_patch" && a.status === "APPROVED")
           .pop();
         const approvalId = (pending || approved)?.id;
-        const result = await longTask("继续执行中", () =>
-          api("POST", `/runs/${runId}/resume`, approvalId ? { approval_id: approvalId } : {}),
-        );
-        state.run = result.run;
-        announceRun(result);
+        const run = await longTask("已提交后台执行", async () => {
+          state.run = await api(
+            "POST",
+            `/runs/${runId}/resume`,
+            approvalId ? { approval_id: approvalId } : {},
+          );
+          await waitForRunToSettle(runId);
+          return state.run;
+        });
+        announceRun(run);
         await refreshRequirement();
         break;
       }
@@ -1347,16 +1385,21 @@ document.addEventListener("submit", async (event) => {
   }
 });
 
-/** 一次 start/resume 之后告诉用户停在哪 —— 两个停点是流程的正常组成部分。 */
-function announceRun(result) {
-  if (!result.paused) {
-    toast("流程已走到终态", "ok");
-    return;
-  }
-  if (result.pause_reason === "tool_approval") {
-    toast("代码变更需要 OWNER 批准后才能写盘", "warn");
-  } else if (result.pause_reason === "final_approval") {
+/** 后台执行结束（到达停点或终态）后告诉用户结果 —— 两个停点是流程的正常组成部分。 */
+function announceRun(run) {
+  if (!run) return;
+  if (run.status === "COMPLETED") {
+    toast("工作流已完成", "ok");
+  } else if (run.status === "FAILED") {
+    toast(`执行失败（${run.error_code || "未知错误"}），详情见测试/交付物`, "bad");
+  } else if (run.status === "CANCELLED") {
+    toast("工作流已取消", "warn");
+  } else if (run.status === "IMPLEMENTING" && run.current_step === "TOOL_GATEWAY") {
+    toast("代码变更已生成，等待 OWNER 批准后写盘", "warn");
+  } else if (run.status === "WAITING_APPROVAL") {
     toast("审查已通过，等待最终人工批准", "warn");
+  } else if (run.status === "REJECTED") {
+    toast("已被驳回。点「让 Developer 返工」继续", "warn");
   }
 }
 

@@ -125,7 +125,14 @@ class WorkflowOrchestrator:
 
     # ------------------------------------------------------------------ 启动
 
-    async def start(self, run_id: UUID, *, actor: User) -> RunOutcome:
+    async def start(self, run_id: UUID, *, actor: User) -> WorkflowRun:
+        """校验并**认领**一个 CREATED 运行；真正执行由后台任务接管。
+
+        202 化之后这个方法不再执行任何 Agent —— 它做三件事：权限与状态校验、
+        数据库原子认领（``claim_start``）、返回运行快照。认领与执行分离后，
+        「先读再判断」不再可靠：两个并发 start 可能在不同 worker 上，
+        只有数据库的条件更新能裁决谁赢。
+        """
         run, requirement = await self._load(run_id, actor, WRITE_ROLES, "start")
 
         if WorkflowStatus(run.status) is not WorkflowStatus.CREATED:
@@ -143,17 +150,46 @@ class WorkflowOrchestrator:
                 details={"requirement_status": requirement.status},
             )
 
-        self._transition(run, WorkflowStatus.RUNNING)
+        claimed = await self._workflows.claim_start(run_id)
+        if not claimed:
+            raise ConflictError(
+                "Workflow run has already been started",
+                code="WORKFLOW_ALREADY_STARTED",
+                details={"current_status": run.status, "current_step": run.current_step},
+            )
+        await self._session.refresh(run)
         run.started_at = datetime.now(UTC)
-        run.current_step = WorkflowStep.PRODUCT_AGENT.value
         await self._session.commit()
-        logger.info("workflow run started | run=%s requirement=%s", run.id, run.requirement_id)
-
-        return await self._advance(run, actor)
+        # claim 走的是条件 UPDATE 而不是 _transition —— 状态变化事件在这里手动补发，
+        # 保证 SSE 观察者看到的序列与同步时代一致
+        get_event_bus().emit(
+            Event(
+                type="workflow.status",
+                requirement_id=run.requirement_id,
+                payload={
+                    "run_id": str(run.id),
+                    "status": run.status,
+                    "current_step": run.current_step,
+                },
+            )
+        )
+        logger.info(
+            "workflow run claimed for background execution | run=%s requirement=%s",
+            run.id,
+            run.requirement_id,
+        )
+        return run
 
     # ------------------------------------------------------------------ 恢复
 
-    async def resume(self, run_id: UUID, *, actor: User, approval_id: UUID | None = None) -> RunOutcome:
+    async def prepare_resume(
+        self, run_id: UUID, *, actor: User, approval_id: UUID | None = None
+    ) -> WorkflowRun:
+        """校验「这个暂停点能不能恢复、需要什么参数」；执行交给后台任务。
+
+        只校验不执行：状态此刻合法不代表 30 秒后还合法（可能已被取消），
+        后台任务 ``execute_pending`` 里会再按当下状态分派。
+        """
         run, _requirement = await self._load(run_id, actor, WRITE_ROLES, "resume")
         status = WorkflowStatus(run.status)
         step = WorkflowStep(run.current_step)
@@ -171,14 +207,11 @@ class WorkflowOrchestrator:
                     code="APPROVAL_ID_REQUIRED",
                     details={"hint": "GET /requirements/{id}/approvals?status=PENDING"},
                 )
-            outcome = await self._apply_and_continue(run, actor, approval_id)
-            if outcome is not None:
-                return outcome
-            return await self._advance(run, actor)
+            return run
 
         if status in (WorkflowStatus.REJECTED, WorkflowStatus.REVISION_REQUIRED):
             # 被最终驳回 / 审查要求返工：回到实现阶段重新出补丁
-            return await self._advance(run, actor)
+            return run
 
         raise ConflictError(
             "Workflow run is not resumable in its current state",
@@ -227,6 +260,115 @@ class WorkflowOrchestrator:
         logger.info("workflow run cancelled | run=%s", run.id)
         return run
 
+    # ------------------------------------------------------------------ 后台执行体
+
+    @classmethod
+    async def execute_pending(
+        cls,
+        run_id: UUID,
+        actor_id: UUID,
+        *,
+        provider: LLMProvider,
+        workspace_root: Path,
+        approval_id: UUID | None = None,
+    ) -> None:
+        """后台任务的执行体：自管会话生命周期，按当下状态分派执行。
+
+        端点在 202 之前只做了校验；从 202 到任务真正开跑之间状态可能又变了
+        （比如恰好被取消），所以这里**按当下状态重新分派**而不是信任端点的判断：
+
+        - ``(IMPLEMENTING, TOOL_GATEWAY)`` + approval_id → 写盘并继续
+        - ``RUNNING/PRODUCT_AGENT``（start 刚认领完）/ ``REJECTED`` / ``REVISION_REQUIRED``
+          → 从主循环进入
+        - 其它状态：记日志后安静退出 —— 状态变了不是错误，更不能把运行标成 FAILED
+
+        兜底：任何非 Conflict 异常都会用**独立会话**把运行标为 ``FAILED``。
+        没有这个兜底，后台任务里一个意料之外的 bug 会让运行永久卡在执行中。
+        """
+        from app.infrastructure.db.session import get_session_factory
+
+        factory = get_session_factory()
+        try:
+            async with factory() as session:
+                user = await session.get(User, actor_id)
+                if user is None:
+                    logger.error(
+                        "background execution skipped: actor missing | run=%s actor=%s", run_id, actor_id
+                    )
+                    return
+                executor = cls(session, provider, workspace_root=workspace_root)
+                run = await executor._workflows.get(run_id)
+                if run is None:
+                    logger.warning("background execution skipped: run missing | run=%s", run_id)
+                    return
+
+                status = WorkflowStatus(run.status)
+                step = WorkflowStep(run.current_step)
+                if (status, step) == (WorkflowStatus.IMPLEMENTING, WorkflowStep.TOOL_GATEWAY):
+                    if approval_id is None:
+                        logger.warning(
+                            "background execution skipped: patch pause without approval_id | run=%s", run_id
+                        )
+                        return
+                    outcome = await executor._apply_and_continue(run, user, approval_id)
+                    if outcome is None:
+                        await executor._advance(run, user)
+                elif (status, step) == (WorkflowStatus.RUNNING, WorkflowStep.PRODUCT_AGENT) or status in (
+                    WorkflowStatus.REJECTED,
+                    WorkflowStatus.REVISION_REQUIRED,
+                ):
+                    await executor._advance(run, user)
+                else:
+                    logger.info(
+                        "background execution skipped: state changed | run=%s status=%s step=%s",
+                        run_id,
+                        status,
+                        step,
+                    )
+        except ConflictError as exc:
+            # 状态冲突 = 有人在我们之前动了这个运行（取消/并发恢复）。它已有合法状态，
+            # 绝不能标 FAILED —— 静默退出即可
+            logger.warning("background execution skipped | run=%s code=%s", run_id, exc.code)
+        except Exception as exc:
+            logger.exception("background execution failed | run=%s", run_id)
+            await cls._mark_failed_standalone(run_id, exc)
+
+    @staticmethod
+    async def _mark_failed_standalone(run_id: UUID, exc: Exception) -> None:
+        """用独立会话把运行标为 FAILED —— 主会话可能已经处于不可用状态。"""
+        from app.infrastructure.db.session import get_session_factory
+
+        try:
+            async with get_session_factory()() as session:
+                repo = WorkflowRunRepository(session)
+                run = await repo.get(run_id)
+                if run is None:
+                    return
+                if WorkflowStatus(run.status) in {
+                    WorkflowStatus.COMPLETED,
+                    WorkflowStatus.FAILED,
+                    WorkflowStatus.CANCELLED,
+                }:
+                    return  # 已有终态，不覆盖
+                run.status = WorkflowStatus.FAILED.value
+                run.error_code = getattr(exc, "code", None) or "WORKFLOW_BACKGROUND_ERROR"
+                run.error_message = str(exc)[:500]
+                run.finished_at = datetime.now(UTC)
+                await session.commit()
+                get_event_bus().emit(
+                    Event(
+                        type="workflow.status",
+                        requirement_id=run.requirement_id,
+                        payload={
+                            "run_id": str(run.id),
+                            "status": run.status,
+                            "current_step": run.current_step,
+                        },
+                    )
+                )
+        except Exception:  # noqa: BLE001 - 兜底失败只能记日志
+            logger.exception("failed to mark run as FAILED | run=%s", run_id)
+
     # ------------------------------------------------------------------ 读取
 
     async def list_artifacts(self, run_id: UUID, *, actor: User) -> tuple[list[Artifact], int]:
@@ -240,6 +382,14 @@ class WorkflowOrchestrator:
 
     async def _advance(self, run: WorkflowRun, actor: User) -> RunOutcome:
         for _iteration in range(_MAX_ADVANCE_ITERATIONS):
+            # 取消在**步边界**生效：主循环是后台任务，取消请求只改数据库，
+            # 不会通知本协程 —— 每轮开始前查一次真实状态（独立查询绕过身份映射，
+            # 否则 session 返回的还是内存里的旧对象）。注意这让「执行到一半的
+            # 取消」最多延迟一个步骤（模型调用结束时）生效，而不是立即中断
+            if await self._workflows.get_status(run.id) is WorkflowStatus.CANCELLED:
+                logger.info("workflow cancelled mid-flight | run=%s", run.id)
+                return RunOutcome(run, paused=True, pause_reason="cancelled")
+
             status = WorkflowStatus(run.status)
             step = WorkflowStep(run.current_step)
 

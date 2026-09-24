@@ -15,10 +15,12 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 
 from app.api.router import api_router
+from app.application.workflow_tasks import WorkflowTaskManager, recover_orphaned_runs
 from app.common.error_handlers import register_exception_handlers
 from app.common.rate_limit import (
     TIER_AUTH,
@@ -70,6 +72,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         logger.info("AUTO_CREATE_TABLES=false：表结构由 alembic 管理（alembic upgrade head）")
     await bus.start()
+
+    # 进程重启后把卡在执行中的运行标记为 FAILED/INTERRUPTED（别的 worker
+    # 正在执行的会被运行锁跳过）
+    await recover_orphaned_runs(
+        skip_running=app.state.workflow_tasks.active_run_ids(),
+        redis=redis_client,
+    )
 
     logger.info(
         "%s started | env=%s | db=%s | llm_provider=%s | events=%s",
@@ -161,6 +170,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.redis = redis_client
     bus = EventBus(redis=redis_client)
     app.state.event_bus = bus
+    # 后台工作流执行：注册表 + 跨 worker 运行锁（redis 未配置时退化为进程内）
+    app.state.workflow_tasks = WorkflowTaskManager(
+        workspace_root=Path(settings.workspace_root),
+        redis=redis_client,
+    )
     configure_event_bus(bus)
 
     # 限流器同样二选一：有 Redis 才能在多 worker 之间共享计数

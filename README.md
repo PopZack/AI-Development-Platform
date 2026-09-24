@@ -525,8 +525,8 @@ app/infrastructure/tools/
 
 | Method | Path | 权限 | 说明 |
 |---|---|---|---|
-| POST | `/runs/{id}/start` | OWNER / DEVELOPER | 启动执行，跑到第一个停点（**慢**，会真实调模型） |
-| POST | `/runs/{id}/resume` | OWNER / DEVELOPER | 从停点恢复 |
+| POST | `/runs/{id}/start` | OWNER / DEVELOPER | **202 异步启动**：校验 + 数据库原子认领后立即返回，执行在后台 |
+| POST | `/runs/{id}/resume` | OWNER / DEVELOPER | **202 异步恢复**（同一运行已有后台任务时 409 `WORKFLOW_RUN_BUSY`） |
 | POST | `/runs/{id}/approve` | **仅 OWNER** | 最终人工批准 → `COMPLETED` |
 | POST | `/runs/{id}/reject` | **仅 OWNER** | 最终驳回（可 resume 返工） |
 | POST | `/runs/{id}/cancel` | OWNER / DEVELOPER | 取消（非终态且未 `APPROVED`） |
@@ -1066,9 +1066,30 @@ RuntimeError: 'cryptography' package is required for sha256_password or caching_
 别改成打原串 —— 日志会被采集、转发、长期保存，多 worker 下每个 worker 各打一遍，
 等于把库密码公布出去。`tests/unit/test_security.py` 有一条静态检查守着这件事。
 
-### 一次同步请求可能长达几分钟，反向代理的超时要跟着调
+### start/resume 是异步的：202 受理，进展走事件流
 
-`start` / `resume` 是**同步**接口 —— 它们真的在请求里等模型返回。实测（2026-09-23，真端点）：
+`start` / `resume` 返回 **202 + 运行快照**，真实执行（多次模型调用，累计可达数分钟）
+在**后台任务**里进行 —— 用户不再阻塞等待。观察进展的两条路：
+
+- **事件流**（推荐）：`GET /requirements/{id}/events`，会依次收到
+  `workflow.status`（每一步状态迁移）、`artifact.created`（交付物）、
+  `approval.created`（补丁就绪，含 `approval_id`）
+- **轮询**：`GET /runs/{id}`，`(IMPLEMENTING, TOOL_GATEWAY)` 与
+  `(WAITING_APPROVAL, APPROVAL)` 是需要人工介入的停点
+
+背后的机制（`app/application/workflow_tasks.py`）：
+
+- **并发裁决**：start 靠数据库原子认领（`UPDATE … WHERE status='CREATED'`，
+  跨 worker 有效）；resume 靠「进程内注册表 + Redis 运行锁」（TTL 90s、30s 心跳续期），
+  撞锁返回 `409 WORKFLOW_RUN_BUSY`
+- **取消在步边界生效**：主循环每轮开始前查一次真实状态，发现 `CANCELLED` 即退出
+  —— 取消最多延迟一个步骤（一次模型调用）生效，而不是立即掐断进行中的调用
+- **崩溃不留僵尸**：进程重启时，卡在执行中的运行被标记 `FAILED / INTERRUPTED`
+  （持有运行锁的其它活 worker 正在执行的除外）
+- **后台任务兜底**：执行体任何非冲突异常都会用独立会话把运行标为 `FAILED`，
+  绝不让运行永久卡在执行中
+
+单次模型调用的耗时画像（2026-09-23，真端点）：
 
 | 角色 | prompt | completion | 实测耗时 |
 |---|---|---|---|
@@ -1092,14 +1113,17 @@ token**（这个端点会下发 `reasoning_content`）。拿 completion 去判�
   数据持续流动就不会触发。
 
 超时也**不再重试**（它和网络抖动不是一回事，见 `errors.py` 的说明），
-所以最坏等待是 180s 而不是 540s。
+后台执行里单步失败的最坏等待是 180s，之后运行变 `FAILED`（事件流可见）。
 
 另两条仍然成立：
 
 1. **SSE 那条路径要关掉 `proxy_buffering`**，否则事件会被攒着不发。
 2. **超时不是静默失败**：工作流变成 `FAILED` + `error_code=TIMEOUT`，
-   `error_message` 写明是 provider 超时，需求状态留在上一步（不会停在半路），
-   客户端拿到 504。排障先看 `GET /runs/{id}`，不要只看 HTTP 码 —— 504 有好几种来源。
+   `error_message` 写明是 provider 超时，需求状态留在上一步（不会停在半路）。
+   异步之后没有 504 了 —— 客户端从事件流/轮询里看到失败，排障先看 `GET /runs/{id}`。
+
+反向代理的 `proxy_read_timeout` 对 start/resume 不再是敏感项（响应立即返回），
+对 SSE 仍然要关 `proxy_buffering`。
 
 #### 端点行为用探针量，别推断
 

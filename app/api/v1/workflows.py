@@ -14,25 +14,33 @@ Layer: Presentation（Router）。
 幂等键走 ``Idempotency-Key`` 请求头（文档 §12.2 的示例就是这么发的），而不是请求体：
 它的语义是「这次请求的标识」，重试时请求体可以完全不变，头天然跟着一起重发。
 
-⚠️ start/resume 是**同步长请求**：内部会真实调模型（一次 20~40 秒）。
-文档 §13 的异步执行 + SSE 属 Stage 5。
+**start/resume 是异步的（202）**：端点只做校验与认领，真实执行（多次模型调用，
+可达数分钟）在后台任务里进行。客户端通过两种方式观察进展：
+
+- 订阅事件流 ``GET /requirements/{id}/events``（approval.created /
+  workflow.status / artifact.created）
+- 轮询 ``GET /runs/{id}``，``(IMPLEMENTING, TOOL_GATEWAY)`` 与
+  ``(WAITING_APPROVAL, APPROVAL)`` 是需要人工介入的停点
+
 """
 
 from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Header, Response, status
+from fastapi import APIRouter, Header, Request, Response, status
 from pydantic import BaseModel, Field
 
 from app.common.dependencies import (
     CurrentUserDep,
+    LLMProviderDep,
     WorkflowOrchestratorDep,
     WorkflowServiceDep,
+    WorkflowTaskManagerDep,
 )
 from app.common.openapi import AUTH_ERROR_RESPONSES
 from app.schemas.agent import AgentArtifactList, ArtifactRead
-from app.schemas.workflow import RunExecuteResult, WorkflowRunRead
+from app.schemas.workflow import WorkflowRunRead
 
 router = APIRouter(tags=["workflows"])
 
@@ -107,56 +115,66 @@ async def get_workflow_run(
 
 @router.post(
     "/runs/{run_id}/start",
-    response_model=RunExecuteResult,
-    summary="启动执行（需 OWNER 或 DEVELOPER；慢，会真实调模型）",
+    response_model=WorkflowRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="启动执行（异步：202 受理，后台执行）",
     description=(
-        "从 `CREATED` 一路执行：Product Agent → Architect Agent → Developer Agent →\n"
-        "尝试写盘。到达第一个需要人工介入的停点时返回：\n\n"
-        "- `paused=true, pause_reason=tool_approval`：补丁需要 OWNER 批准，\n"
-        "  `approval_id` 直接给出；批准后带它调 `/resume`\n"
-        "- Agent 失败 → 工作流变 `FAILED` 并返回错误\n\n"
-        "只允许对 `CREATED` 状态的运行调用；重复调用返回 409。"
+        "校验后**立即返回 202**，执行在后台进行：Product Agent → Architect Agent →\n"
+        "Developer Agent → 尝试写盘 → 停在第一个需要人工介入的停点。\n\n"
+        "- 进展观察：订阅 `GET /requirements/{id}/events`，或轮询 `GET /runs/{id}`\n"
+        "- 补丁就绪时会收到 `approval.created` 事件；批准后带 `approval_id` 调 `/resume`\n"
+        "- Agent 失败 → 工作流变 `FAILED`（事件流与轮询都能看到）\n\n"
+        "只允许对 `CREATED` 状态的运行调用；并发/重复调用返回 409 "
+        "（数据库原子认领裁决，跨 worker 有效）。"
     ),
     responses=AUTH_ERROR_RESPONSES,
 )
 async def start_workflow_run(
-    run_id: UUID, orchestrator: WorkflowOrchestratorDep, current_user: CurrentUserDep
-) -> RunExecuteResult:
-    outcome = await orchestrator.start(run_id, actor=current_user)
-    return RunExecuteResult(
-        run=WorkflowRunRead.model_validate(outcome.run),
-        paused=outcome.paused,
-        pause_reason=outcome.pause_reason,
-        approval_id=outcome.approval_id,
-    )
+    run_id: UUID,
+    response: Response,
+    request: Request,
+    orchestrator: WorkflowOrchestratorDep,
+    tasks: WorkflowTaskManagerDep,
+    provider: LLMProviderDep,
+    current_user: CurrentUserDep,
+) -> WorkflowRunRead:
+    run = await orchestrator.start(run_id, actor=current_user)
+    await tasks.launch(run.id, current_user.id, provider=provider)
+    response.headers["Location"] = f"{request.app.state.settings.api_v1_prefix}/runs/{run_id}"
+    return WorkflowRunRead.model_validate(run)
 
 
 @router.post(
     "/runs/{run_id}/resume",
-    response_model=RunExecuteResult,
-    summary="从停点恢复执行（慢，会真实调模型）",
+    response_model=WorkflowRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="从停点恢复执行（异步：202 受理，后台执行）",
     description=(
         "- 补丁审批暂停点：请求体必须带 `approval_id`（OWNER 已批准）\n"
         "- `REJECTED` / `REVISION_REQUIRED`：不带 approval_id，重新走实现 → 测试 → 审查\n"
-        "- 最终审批暂停点：不能用 resume，走 `/approve` 或 `/reject`"
+        "- 最终审批暂停点：不能用 resume，走 `/approve` 或 `/reject`\n\n"
+        "同一个运行已有后台任务在执行时返回 `409 WORKFLOW_RUN_BUSY`。"
     ),
     responses=AUTH_ERROR_RESPONSES,
 )
 async def resume_workflow_run(
     run_id: UUID,
+    response: Response,
+    request: Request,
     orchestrator: WorkflowOrchestratorDep,
+    tasks: WorkflowTaskManagerDep,
+    provider: LLMProviderDep,
     current_user: CurrentUserDep,
     body: ResumeBody | None = None,
-) -> RunExecuteResult:
-    outcome = await orchestrator.resume(
+) -> WorkflowRunRead:
+    run = await orchestrator.prepare_resume(
         run_id, actor=current_user, approval_id=body.approval_id if body else None
     )
-    return RunExecuteResult(
-        run=WorkflowRunRead.model_validate(outcome.run),
-        paused=outcome.paused,
-        pause_reason=outcome.pause_reason,
-        approval_id=outcome.approval_id,
+    await tasks.launch(
+        run.id, current_user.id, approval_id=body.approval_id if body else None, provider=provider
     )
+    response.headers["Location"] = f"{request.app.state.settings.api_v1_prefix}/runs/{run_id}"
+    return WorkflowRunRead.model_validate(run)
 
 
 @router.post(

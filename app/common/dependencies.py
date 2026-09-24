@@ -24,6 +24,7 @@ from app.application.requirement_service import RequirementService
 from app.application.user_service import UserService
 from app.application.workflow_orchestrator import WorkflowOrchestrator
 from app.application.workflow_service import WorkflowService
+from app.application.workflow_tasks import WorkflowTaskManager
 from app.common.exceptions import AuthenticationError
 from app.config.settings import Settings
 from app.infrastructure.db.session import get_session
@@ -42,6 +43,7 @@ __all__ = [
     "ApprovalServiceDep",
     "WorkflowServiceDep",
     "WorkflowOrchestratorDep",
+    "WorkflowTaskManagerDep",
     "CurrentUserDep",
     "LimitQuery",
     "OffsetQuery",
@@ -105,6 +107,11 @@ def get_approval_service(session: SessionDep) -> ApprovalService:
     return ApprovalService(session)
 
 
+def get_workflow_task_manager(request: Request) -> WorkflowTaskManager:
+    """后台任务管理器从 app.state 取：每个进程一份，测试可直接替换。"""
+    return request.app.state.workflow_tasks
+
+
 def get_workflow_orchestrator(
     session: SessionDep, provider: LLMProviderDep, settings: SettingsDep
 ) -> WorkflowOrchestrator:
@@ -120,6 +127,7 @@ AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
 ApprovalServiceDep = Annotated[ApprovalService, Depends(get_approval_service)]
 WorkflowServiceDep = Annotated[WorkflowService, Depends(get_workflow_service)]
 WorkflowOrchestratorDep = Annotated[WorkflowOrchestrator, Depends(get_workflow_orchestrator)]
+WorkflowTaskManagerDep = Annotated["WorkflowTaskManager", Depends(get_workflow_task_manager)]
 
 # auto_error=False 是刻意的：HTTPBearer 默认的失败行为是抛 403 且响应体不符合
 # 我们的统一错误结构。关掉它，由我们自己抛 AuthenticationError（401 + 统一错误体）。

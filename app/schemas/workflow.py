@@ -15,7 +15,7 @@ from uuid import UUID
 from app.domain.enums import WorkflowStatus, WorkflowStep
 from app.schemas.common import ReadModel, UtcDateTime
 
-__all__ = ["RunExecuteResult", "WorkflowRunRead"]
+__all__ = ["WorkflowRunRead"]
 
 
 class WorkflowRunRead(ReadModel):
@@ -32,19 +32,3 @@ class WorkflowRunRead(ReadModel):
     error_message: str | None = None
     created_at: UtcDateTime
     updated_at: UtcDateTime
-
-
-class RunExecuteResult(ReadModel):
-    """start / resume 的结果。
-
-    ``paused=True`` 时 ``pause_reason`` 说明在等什么：
-
-    - ``tool_approval``：补丁写盘需要 OWNER 批准，``approval_id`` 直接给出，
-      批准后带它调 resume
-    - ``final_approval``：审查已通过，等最终人工决定（走 /approve 或 /reject）
-    """
-
-    run: WorkflowRunRead
-    paused: bool
-    pause_reason: str | None = None
-    approval_id: UUID | None = None
